@@ -39,13 +39,13 @@ class VAE(nn.Module):
         self.conv_batch_norm5 = nn.BatchNorm2d(256 * size)
         self.conv_batch_norm6 = nn.BatchNorm2d(512 * size)
 
-        self.dec_conv1 = nn.Conv2d(latent_dim, 512 * size, kernel_size=1, stride=1, padding=0)
-        self.dec_conv2 = nn.ConvTranspose2d(512 * size, 256 * size, kernel_size=2, stride=2, padding=1, output_padding=1)
-        self.dec_conv3 = nn.ConvTranspose2d(256 * size, 128 * size, kernel_size=2, stride=2, padding=1, output_padding=1)
-        self.dec_conv4 = nn.ConvTranspose2d(128 * size, 64 * size, kernel_size=2, stride=2, padding=1, output_padding=1)
-        self.dec_conv5 = nn.ConvTranspose2d(64 * size, 32 * size, kernel_size=2, stride=2, padding=1, output_padding=1)
-        self.dec_conv6 = nn.ConvTranspose2d(32 * size, 16 * size, kernel_size=2, stride=2, padding=1, output_padding=1)
-        self.dec_conv7 = nn.ConvTranspose2d(16 * size, input_channels, kernel_size=2, stride=1)
+        self.dec_conv1 = nn.Conv2d(latent_dim, 512 * size, kernel_size=(6, 4), stride=1, padding=0)
+        self.dec_conv2 = nn.ConvTranspose2d(512 * size, 256 * size, kernel_size=(3,4), stride=2, padding=1)
+        self.dec_conv3 = nn.ConvTranspose2d(256 * size, 128 * size, kernel_size=(3,3), stride=2, padding=1)
+        self.dec_conv4 = nn.ConvTranspose2d(128 * size, 64 * size, kernel_size=(3,3), stride=2, padding=1)
+        self.dec_conv5 = nn.ConvTranspose2d(64 * size, 32 * size, kernel_size=(2,3), stride=2, padding=1)
+        self.dec_conv6 = nn.ConvTranspose2d(32 * size, 16 * size, kernel_size=(2,4), stride=2, padding=1)
+        self.dec_conv7 = nn.ConvTranspose2d(16 * size, input_channels, kernel_size=(3,3), stride=1)
         
         # dec conv Batch norms
         self.dec_batch_norm1 = nn.BatchNorm2d(512 * size)
@@ -57,8 +57,8 @@ class VAE(nn.Module):
         self.dec_batch_norm7 = nn.BatchNorm2d(input_channels)
         
         # Latent space parameters
-        self.fc_mu = nn.Conv2d(size*512, latent_dim, 1)
-        self.fc_logvar = nn.Conv2d(size*512, latent_dim, 1)
+        self.final_conv_mu = nn.Conv2d(size*512, latent_dim, 1)
+        self.final_conv_logvar = nn.Conv2d(size*512, latent_dim, 1)
         
         # Initialize weights properly
         self._initialize_weights()
@@ -93,9 +93,9 @@ class VAE(nn.Module):
         x = F.relu(self.conv_batch_norm3(self.conv3(x)))  
         x = F.relu(self.conv_batch_norm4(self.conv4(x)))  
         x = F.relu(self.conv_batch_norm5(self.conv5(x)))  
-        x = F.relu(self.conv_batch_norm6(self.conv6(x)))  
-        mu = self.fc_mu(x)
-        logvar = self.fc_logvar(x)
+        x = F.relu(self.conv_batch_norm6(self.conv6(x))) 
+        mu = self.final_conv_mu(x)
+        logvar = self.final_conv_logvar(x)
         return mu, logvar
     
     def decode(self, z: Tensor) -> Tensor:
@@ -105,9 +105,7 @@ class VAE(nn.Module):
         x = F.relu(self.dec_batch_norm4(self.dec_conv4(x)))  
         x = F.relu(self.dec_batch_norm5(self.dec_conv5(x)))  
         x = F.relu(self.dec_batch_norm6(self.dec_conv6(x)))  
-        
         x = self.dec_batch_norm7(self.dec_conv7(x)) 
-        x = F.interpolate(x, size=(320, 180), mode='bilinear', align_corners=False)
         x = torch.tanh(x)
         return x
     
