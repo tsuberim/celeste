@@ -37,7 +37,19 @@ class VideoDataset:
         if self.max_frames is not None:
             total_frames = min(total_frames, self.max_frames)
         
-        frames = []
+        # Get frame dimensions from first frame
+        ret, first_frame = cap.read()
+        if not ret:
+            cap.release()
+            raise ValueError("Could not read first frame from video")
+        
+        height, width = first_frame.shape[:2]
+        
+        # Preallocate array: (frames, channels, width, height)
+        frames_array = np.zeros((total_frames, 3, width, height), dtype=np.float32)
+        
+        # Reset video to beginning
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
         # Progress bar for frame loading
         with tqdm(total=total_frames, desc="Loading frames") as pbar:
@@ -51,15 +63,15 @@ class VideoDataset:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_normalized = (frame_rgb.astype(np.float32) / 255.0) * 2.0 - 1.0
                 
-                frames.append(frame_normalized)
+                # Store directly in preallocated array
+                frames_array[frame_count] = frame_normalized.transpose(2, 1, 0)  # (H, W, C) -> (C, W, H)
                 frame_count += 1
                 pbar.update(1)
         
         cap.release()
         
-        # Convert to (frames, channels, height, width) using einops
-        frames_array = np.array(frames)
-        frames_array = einops.rearrange(frames_array, 'f h w c -> f c w h')
+        # Trim to actual number of frames loaded
+        frames_array = frames_array[:frame_count]
         
         return frames_array
     
