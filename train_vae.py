@@ -129,6 +129,8 @@ def train_vae(video_path: str,
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
         
         for batch_idx, frames in enumerate(pbar):
+            optimizer.zero_grad()
+            
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
             x = rearrange(frames, 'b s c w h -> (b s) c w h')
@@ -136,10 +138,7 @@ def train_vae(video_path: str,
             recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
             mu = rearrange(mu, '(b s) c w h -> b s c w h', b=b)
             logvar = rearrange(logvar, '(b s) c w h -> b s c w h', b=b)
-    
-            optimizer.zero_grad()
             loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
-
             loss.backward()
             optimizer.step()
             
