@@ -123,17 +123,11 @@ def train_vae(video_path: str,
             if (batch_idx + 0) % 100 == 0:
                 save_model(vae, save_dir, epoch + 1, x, recon_x, batch_idx + 1)
             
-            pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Recon Loss': f'{recon_loss.item():.4f}', 'KL Loss': f'{kl_loss.item():.4f}'})
-        
-        # Epoch summary
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}: Loss = {avg_loss:.4f}")
-        
-        # Log epoch metrics
-        wandb.log({
-            "epoch_loss": avg_loss,
-            "epoch": epoch
-        }, step=(epoch + 1) * 1000)
+            pbar.set_postfix({
+                'Loss': f'{loss.item():.4f}', 
+                'Recon Loss': f'{recon_loss.item():.4f}', 
+                'KL Loss': f'{kl_loss.item():.4f}'
+            })
         
         # Save after each epoch
         save_model(vae, save_dir, epoch + 1, x, recon_x)

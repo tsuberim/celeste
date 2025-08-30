@@ -109,7 +109,6 @@ class VAE(nn.Module):
         
         x = self.dec_batch_norm7(self.dec_conv7(x)) 
         x = F.interpolate(x, size=(320, 180), mode='bilinear', align_corners=False)
-        
         x = torch.tanh(x)
         return x
     
