@@ -137,9 +137,9 @@ def train_vae(video_path: str,
             mu = rearrange(mu, '(b s) c w h -> b s c w h', b=b)
             logvar = rearrange(logvar, '(b s) c w h -> b s c w h', b=b)
     
+            optimizer.zero_grad()
             loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
 
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
