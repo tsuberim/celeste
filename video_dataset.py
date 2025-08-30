@@ -5,6 +5,7 @@ import os
 from typing import Tuple, Iterator
 from tqdm import tqdm
 import einops
+from einops import rearrange
 
 class VideoDataset:
     def __init__(self, video_path: str, sequence_length: int = 16, max_frames: int = None):
@@ -59,12 +60,11 @@ class VideoDataset:
                 if not ret or (self.max_frames is not None and frame_count >= self.max_frames):
                     break
                 
-                # Convert BGR to RGB and normalize to [-1, 1]
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_normalized = (frame_rgb.astype(np.float32) / 255.0) * 2.0 - 1.0
-                
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_normalized = (frame.astype(np.float32) / 255.0) * 2.0 - 1.0
+
                 # Store directly in preallocated array
-                frames_array[frame_count] = frame_normalized.transpose(2, 1, 0)  # (H, W, C) -> (C, W, H)
+                frames_array[frame_count] = rearrange(frame_normalized, 'h w c -> c w h')  # (H, W, C) -> (C, W, H)
                 frame_count += 1
                 pbar.update(1)
         
@@ -149,9 +149,9 @@ def main():
             col = i % 4
             
             # Convert from (channels, height, width) to (height, width, channels) for display
-            frame = einops.rearrange(sequence[i], 'c h w -> h w c')
+            frame = einops.rearrange(sequence[i], 'c w h -> h w c')
+            frame = (frame - frame.min()) / (frame.max() - frame.min())
             frame = np.clip(frame, 0, 1)  # Ensure values are in [0, 1]
-            
             axes[row, col].imshow(frame)
             axes[row, col].set_title(f'Frame {i}')
             axes[row, col].axis('off')
@@ -169,9 +169,9 @@ def main():
                 for frame_idx in range(4):
                     if frame_idx < batch.shape[1]:
                         # Convert from (channels, height, width) to (height, width, channels) for display
-                        frame = einops.rearrange(batch[seq_idx, frame_idx], 'c h w -> h w c')
-                        frame = np.clip(frame, 0, 1)
-                        
+                        frame = einops.rearrange(batch[seq_idx, frame_idx], 'c w h -> h w c')
+                        frame = (frame - frame.min()) / (frame.max() - frame.min())
+                        frame = np.clip(frame, 0, 1)  # Ensure values are in [0, 1]
                         axes[seq_idx, frame_idx].imshow(frame)
                         axes[seq_idx, frame_idx].set_title(f'Seq {seq_idx}, Frame {frame_idx}')
                         axes[seq_idx, frame_idx].axis('off')

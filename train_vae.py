@@ -7,10 +7,18 @@ import argparse
 from tqdm import tqdm
 import wandb
 from einops import rearrange
-
+import cv2
 from video_dataset import VideoDataset
 from vae import create_vae, vae_loss
 from utils import get_device
+import numpy as np
+from einops import rearrange
+
+def transform_frame_batch(frame):
+    frame = rearrange(frame, 'b c w h -> b h w c')
+    frame = (frame - frame.min()) / (frame.max() - frame.min())
+    frame = torch.clamp(frame, 0, 1)  # Ensure values are in [0, 1]
+    return frame
 
 def save_model(vae, save_dir: str, epoch: int, x=None, recon_x=None, batch_idx=None):
     """Save VAE model checkpoint and log reconstructions"""
@@ -27,14 +35,12 @@ def save_model(vae, save_dir: str, epoch: int, x=None, recon_x=None, batch_idx=N
     if x is not None and recon_x is not None and batch_idx is not None:
         x_sample = x[:6]
         recon_sample = recon_x[:6, 0]
-        x_sample = rearrange(x_sample, 'b c w h -> b c h w')
-        recon_sample = rearrange(recon_sample, 'b c w h -> b c h w')
-        
-        # Move to CPU and denormalize from [-1, 1] to [0, 255] for wandb
-        x_sample = ((x_sample.cpu() + 1) / 2 * 255).clamp(0, 255).to(torch.uint8)
-        recon_sample = ((recon_sample.cpu() + 1) / 2 * 255).clamp(0, 255).to(torch.uint8)
-        
-        comparison = torch.cat([x_sample, recon_sample], dim=3)
+
+        x_sample = transform_frame_batch(x_sample)
+        recon_sample = transform_frame_batch(recon_sample)
+
+        comparison = torch.cat([x_sample, recon_sample], dim=2)
+        comparison = rearrange(comparison, 'b h w c -> b c h w')
         wandb.log({
             f"reconstructions": [
                 wandb.Image(img) for img in comparison
