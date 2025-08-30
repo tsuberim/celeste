@@ -47,7 +47,7 @@ class VideoDataset:
         height, width = first_frame.shape[:2]
         
         # Preallocate array: (frames, channels, width, height)
-        frames_array = np.zeros((total_frames, 3, width, height), dtype=np.float16)
+        frames_array = np.zeros((total_frames, 3, width, height), dtype=np.float32)
         
         # Reset video to beginning
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -61,7 +61,7 @@ class VideoDataset:
                     break
                 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame_normalized = (frame.astype(np.float16) / 255.0) * 2.0 - 1.0
+                frame_normalized = (frame.astype(np.float32) / 255.0) * 2.0 - 1.0
 
                 # Store directly in preallocated array
                 frames_array[frame_count] = rearrange(frame_normalized, 'h w c -> c w h')  # (H, W, C) -> (C, W, H)
