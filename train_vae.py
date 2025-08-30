@@ -13,6 +13,19 @@ from vae import create_vae, vae_loss
 from utils import get_device
 import numpy as np
 from einops import rearrange
+import atexit
+
+def cleanup_memory():
+    """Clean up PyTorch memory and force garbage collection"""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    # Force garbage collection
+    import gc
+    gc.collect()
+    
+    print("Memory cleanup completed via atexit")
 
 def transform_frame_batch(frame):
     frame = rearrange(frame, 'b c w h -> b h w c')
@@ -90,6 +103,9 @@ def train_vae(video_path: str,
     device = get_device()
     vae = create_vae(input_channels=3, latent_dim=latent_dim, size=size).to(device)
     
+    # Register cleanup function with atexit
+    atexit.register(cleanup_memory)
+    
     # Load checkpoint if exists
     try:
         if hasattr(vae, 'module'):
@@ -123,6 +139,7 @@ def train_vae(video_path: str,
     
             loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
 
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
@@ -153,6 +170,10 @@ def train_vae(video_path: str,
         save_model(vae, save_dir, epoch + 1, x, recon_x)
     
     wandb.finish()
+    
+    # Register cleanup function with atexit
+    atexit.register(cleanup_memory)
+    
     return vae
 
 if __name__ == "__main__":
