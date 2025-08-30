@@ -97,6 +97,8 @@ def train_vae(video_path: str,
     
     print(f"Training on {device}, {len(dataset)} sequences, {num_epochs} epochs")
     
+    global_batch_idx = 0
+    
     for epoch in range(num_epochs):
         vae.train()
         total_loss = 0
@@ -124,18 +126,21 @@ def train_vae(video_path: str,
                 "batch_recon_loss": recon_loss.item(),
                 "batch_kl_loss": kl_loss.item(),
                 "epoch": epoch,
-                "batch": batch_idx
-            }, step=epoch * 1000 + batch_idx)
+                "batch": batch_idx,
+                "global_batch": global_batch_idx
+            }, step=global_batch_idx)
             
             # Save every 100 batches
             if (batch_idx + 0) % 100 == 0:
-                save_model(vae, save_dir, epoch + 1, x, recon_x, batch_idx + 1)
+                save_model(vae, save_dir, epoch + 1, x, recon_x, global_batch_idx + 1)
             
             pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}', 
                 'Recon Loss': f'{recon_loss.item():.4f}', 
                 'KL Loss': f'{kl_loss.item():.4f}'
             })
+            
+            global_batch_idx += 1
         
         # Save after each epoch
         save_model(vae, save_dir, epoch + 1, x, recon_x)
