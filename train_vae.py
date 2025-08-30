@@ -76,11 +76,12 @@ def train_vae(video_path: str,
         }
     )
     
-    # Adjust batch size for multi-GPU
+    # Adjust batch size and learning rate for multi-GPU
     num_gpus = torch.cuda.device_count()
     if num_gpus > 1:
         batch_size *= num_gpus
-        print(f"Using {num_gpus} GPUs, batch size: {batch_size}")
+        learning_rate *= num_gpus  # Scale LR by number of GPUs
+        print(f"Using {num_gpus} GPUs, batch size: {batch_size}, scaled LR: {learning_rate:.2e}")
     
     # Setup dataset and model
     dataset = VideoDataset(video_path, sequence_length=sequence_length, max_frames=max_frames)
@@ -114,11 +115,11 @@ def train_vae(video_path: str,
         for batch_idx, frames in enumerate(pbar):
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
-            x = rearrange(frames, 'b s c h w -> (b s) c h w')
+            x = rearrange(frames, 'b s c w h -> (b s) c w h')
             recon_x, mu, logvar = vae(x)
-            recon_x = rearrange(recon_x, '(b s) c h w -> b s c h w', b=b)
-            mu = rearrange(mu, '(b s) c -> b s c', b=b)
-            logvar = rearrange(logvar, '(b s) c -> b s c', b=b)
+            recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
+            mu = rearrange(mu, '(b s) c w h -> b s c w h', b=b)
+            logvar = rearrange(logvar, '(b s) c w h -> b s c w h', b=b)
     
             loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
 

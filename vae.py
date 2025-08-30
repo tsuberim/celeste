@@ -29,8 +29,8 @@ class VAE(nn.Module):
         self.conv2 = nn.Conv2d(16 * size, 32 * size, kernel_size=4, stride=2, padding=1)
         self.conv3 = nn.Conv2d(32 * size, 64 * size, kernel_size=4, stride=2, padding=1)
         self.conv4 = nn.Conv2d(64 * size, 128 * size, kernel_size=4, stride=2, padding=1)
-        self.conv5 = nn.Conv2d(128 * size, 256 * size, kernel_size=4, stride=2, padding=1)
-        self.conv6 = nn.Conv2d(256 * size, 512 * size, kernel_size=4, stride=2, padding=1)
+        self.conv5 = nn.Conv2d(128 * size, 256 * size, kernel_size=4, stride=1, padding=1)
+        self.conv6 = nn.Conv2d(256 * size, 512 * size, kernel_size=(6, 4), stride=1, padding=1)
         
         self.conv_batch_norm1 = nn.BatchNorm2d(16 * size)
         self.conv_batch_norm2 = nn.BatchNorm2d(32 * size)
@@ -57,8 +57,8 @@ class VAE(nn.Module):
         self.dec_batch_norm7 = nn.BatchNorm2d(input_channels)
         
         # Latent space parameters
-        self.fc_mu = nn.Linear(size*512 * 5 * 2, latent_dim * 16 * 9)
-        self.fc_logvar = nn.Linear(size*512 * 5 * 2, latent_dim * 16 * 9)
+        self.fc_mu = nn.Conv2d(size*512, latent_dim, 1)
+        self.fc_logvar = nn.Conv2d(size*512, latent_dim, 1)
         
         # Initialize weights properly
         self._initialize_weights()
@@ -94,9 +94,8 @@ class VAE(nn.Module):
         x = F.relu(self.conv_batch_norm4(self.conv4(x)))  
         x = F.relu(self.conv_batch_norm5(self.conv5(x)))  
         x = F.relu(self.conv_batch_norm6(self.conv6(x)))  
-        latent_flat = rearrange(x, 'b c h w -> b (c h w)')        
-        mu = self.fc_mu(latent_flat)
-        logvar = self.fc_logvar(latent_flat)
+        mu = self.fc_mu(x)
+        logvar = self.fc_logvar(x)
         return mu, logvar
     
     def decode(self, z: Tensor) -> Tensor:
