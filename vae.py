@@ -54,7 +54,7 @@ class VAE(nn.Module):
         self.dec_batch_norm4 = nn.BatchNorm2d(64 * size)
         self.dec_batch_norm5 = nn.BatchNorm2d(32 * size)
         self.dec_batch_norm6 = nn.BatchNorm2d(16 * size)
-        self.dec_batch_norm7 = nn.BatchNorm2d(input_channels)
+        # No batch norm on final output layer
         
         # Latent space parameters
         self.final_conv_mu = nn.Conv2d(size*512, latent_dim, 1)
@@ -105,7 +105,7 @@ class VAE(nn.Module):
         x = F.relu(self.dec_batch_norm4(self.dec_conv4(x)))  
         x = F.relu(self.dec_batch_norm5(self.dec_conv5(x)))  
         x = F.relu(self.dec_batch_norm6(self.dec_conv6(x)))  
-        x = self.dec_batch_norm7(self.dec_conv7(x)) 
+        x = self.dec_conv7(x)  # No batch norm on final layer
         x = torch.tanh(x)
         return x
     
