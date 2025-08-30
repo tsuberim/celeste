@@ -16,7 +16,12 @@ def save_model(vae, save_dir: str, epoch: int, x=None, recon_x=None, batch_idx=N
     """Save VAE model checkpoint and log reconstructions"""
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, "vae.safetensors")
-    vae.save(save_path)
+    
+    # Handle DataParallel wrapper
+    if hasattr(vae, 'module'):
+        vae.module.save(save_path)
+    else:
+        vae.save(save_path)
 
     # Log reconstructions to wandb if provided
     if x is not None and recon_x is not None and batch_idx is not None:
@@ -80,7 +85,10 @@ def train_vae(video_path: str,
     
     # Load checkpoint if exists
     try:
-        vae.load(os.path.join(save_dir, "vae.safetensors"))
+        if hasattr(vae, 'module'):
+            vae.module.load(os.path.join(save_dir, "vae.safetensors"))
+        else:
+            vae.load(os.path.join(save_dir, "vae.safetensors"))
         print("Checkpoint loaded")
     except Exception as e:
         print(f"Failed to load checkpoint: {e}")
