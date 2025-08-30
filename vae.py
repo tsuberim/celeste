@@ -114,7 +114,7 @@ class VAE(nn.Module):
     def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         mu, logvar = self.encode(x)  
         z = reparameterize(mu, logvar)
-        x_recon = self.decode(z.view(z.size(0), -1, 16, 9))
+        x_recon = self.decode(z)
         return x_recon, mu, logvar
     
     def save(self, path: str):
