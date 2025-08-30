@@ -139,7 +139,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train VAE on video dataset")
     parser.add_argument("--video_path", type=str, default="./videos/z8r255LoVJc.mp4")
     parser.add_argument("--sequence_length", type=int, default=1)
-    parser.add_argument("--max_frames", type=int, default=10000)
+    parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--latent_dim", type=int, default=32)
     parser.add_argument("--size", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=16)
