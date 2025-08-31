@@ -33,16 +33,36 @@ def transform_frame_batch(frame):
     frame = torch.clamp(frame, 0, 1)  # Ensure values are in [0, 1]
     return frame
 
-def save_model(vae, save_dir: str, epoch: int, x=None, recon_x=None, batch_idx=None):
-    """Save VAE model checkpoint and log reconstructions"""
+def save_model(vae, save_dir: str, epoch: int, optimizer=None, scheduler=None, 
+               global_batch_idx=None, x=None, recon_x=None, batch_idx=None):
+    """Save VAE model checkpoint and training state"""
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, "vae.safetensors")
     
-    # Handle DataParallel wrapper
+    # Save model weights
+    model_save_path = os.path.join(save_dir, "vae.safetensors")
     if hasattr(vae, 'module'):
-        vae.module.save(save_path)
+        vae.module.save(model_save_path)
     else:
-        vae.save(save_path)
+        vae.save(model_save_path)
+    
+    # Save training state
+    training_state = {
+        'epoch': epoch,
+        'global_batch_idx': global_batch_idx if global_batch_idx is not None else 0,
+        'model_state_dict': vae.state_dict(),
+    }
+    
+    if optimizer is not None:
+        training_state['optimizer_state_dict'] = optimizer.state_dict()
+    
+    if scheduler is not None:
+        training_state['scheduler_state_dict'] = scheduler.state_dict()
+    
+    # Save training state
+    training_save_path = os.path.join(save_dir, "training_state.pt")
+    torch.save(training_state, training_save_path)
+    
+    print(f"Checkpoint saved: model to {model_save_path}, training state to {training_save_path}")
 
     # Log reconstructions to wandb if provided
     if x is not None and recon_x is not None and batch_idx is not None:
@@ -106,23 +126,46 @@ def train_vae(video_path: str,
     # Register cleanup function with atexit
     atexit.register(cleanup_memory)
     
-    # Load checkpoint if exists
+    optimizer = optim.Adam(vae.parameters(), lr=learning_rate)
+    
+    # Add learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10, verbose=True
+    )
+    
+    # Load checkpoint and training state if exists
+    start_epoch = 0
+    global_batch_idx = 0
+    
     try:
+        # Load model weights
         if hasattr(vae, 'module'):
             vae.module.load(os.path.join(save_dir, "vae.safetensors"))
         else:
             vae.load(os.path.join(save_dir, "vae.safetensors"))
-        print("Checkpoint loaded")
+        print("Model weights loaded")
+        
+        # Load training state
+        training_state_path = os.path.join(save_dir, "training_state.pt")
+        if os.path.exists(training_state_path):
+            training_state = torch.load(training_state_path, map_location=device)
+            optimizer.load_state_dict(training_state['optimizer_state_dict'])
+            if 'scheduler_state_dict' in training_state:
+                scheduler.load_state_dict(training_state['scheduler_state_dict'])
+            start_epoch = training_state['epoch']
+            global_batch_idx = training_state['global_batch_idx']
+            print(f"Training state loaded: epoch {start_epoch}, batch {global_batch_idx}")
+        else:
+            print("No training state found, starting from scratch")
+            
     except Exception as e:
         print(f"Failed to load checkpoint: {e}")
-    
-    optimizer = optim.Adam(vae.parameters(), lr=learning_rate)
+        print("Starting training from scratch")
     
     print(f"Training on {device}, {len(dataset)} sequences, {num_epochs} epochs")
+    print(f"Starting from epoch {start_epoch + 1}")
     
-    global_batch_idx = 0
-    
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         vae.train()
         total_loss = 0
         
@@ -146,6 +189,11 @@ def train_vae(video_path: str,
                 logvar = rearrange(logvar, '(b s) c -> b s c', b=b)
             loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
             loss.backward()
+            
+            # Apply gradient clipping and get gradient norm
+            max_grad_norm = 5.0  # You can adjust this value
+            grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_grad_norm)
+            
             optimizer.step()
             
             total_loss += loss.item()
@@ -154,6 +202,8 @@ def train_vae(video_path: str,
                 "batch_loss": loss.item(),
                 "batch_recon_loss": recon_loss.item(),
                 "batch_kl_loss": kl_loss.item(),
+                "grad_norm": grad_norm,
+                "grad_clipped": grad_norm > max_grad_norm,
                 "epoch": epoch,
                 "batch": batch_idx,
                 "global_batch": global_batch_idx
@@ -161,7 +211,8 @@ def train_vae(video_path: str,
             
             # Save every 100 batches
             if (batch_idx + 0) % 100 == 0:
-                save_model(vae, save_dir, epoch + 1, x, recon_x, global_batch_idx + 1)
+                save_model(vae, save_dir, epoch + 1, optimizer=optimizer, scheduler=scheduler,
+                          global_batch_idx=global_batch_idx + 1, x=x, recon_x=recon_x, batch_idx=global_batch_idx + 1)
             
             pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}', 
@@ -170,9 +221,18 @@ def train_vae(video_path: str,
             })
             
             global_batch_idx += 1
-        
-        # Save after each epoch
-        save_model(vae, save_dir, epoch + 1, x, recon_x)
+    
+    # Step the scheduler based on epoch loss
+    avg_loss = total_loss / len(dataloader)
+    scheduler.step(avg_loss)
+    
+    # Log learning rate
+    current_lr = optimizer.param_groups[0]['lr']
+    wandb.log({"learning_rate": current_lr, "epoch": epoch})
+    
+    # Save after each epoch
+    save_model(vae, save_dir, epoch + 1, optimizer=optimizer, scheduler=scheduler,
+              global_batch_idx=global_batch_idx, x=x, recon_x=recon_x)
     
     wandb.finish()
     
