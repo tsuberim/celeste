@@ -87,24 +87,30 @@ class VAE(nn.Module):
         
     def encode(self, x: Tensor) -> Tensor:
         # x: (batch, channels, 320, 180)
-        x = F.relu(self.conv_batch_norm1(self.conv1(x)))  
-        x = F.relu(self.conv_batch_norm2(self.conv2(x)))  
-        x = F.relu(self.conv_batch_norm3(self.conv3(x)))  
-        x = F.relu(self.conv_batch_norm4(self.conv4(x)))  
-        x = F.relu(self.conv_batch_norm5(self.conv5(x)))  
-        x = F.relu(self.conv_batch_norm6(self.conv6(x))) 
+        x = F.gelu(self.conv_batch_norm1(self.conv1(x)))  
+        x = F.gelu(self.conv_batch_norm2(self.conv2(x)))  
+        x = F.gelu(self.conv_batch_norm3(self.conv3(x)))  
+        x = F.gelu(self.conv_batch_norm4(self.conv4(x)))  
+        x = F.gelu(self.conv_batch_norm5(self.conv5(x)))  
+        x = F.gelu(self.conv_batch_norm6(self.conv6(x))) 
         mu = self.final_conv_mu(x)
         logvar = self.final_conv_logvar(x)
         return mu, logvar
     
     def decode(self, z: Tensor) -> Tensor:
         x = z
-        x = F.relu(self.dec_batch_norm2(self.dec_conv2(x)))  
-        x = F.relu(self.dec_batch_norm3(self.dec_conv3(x)))  
-        x = F.relu(self.dec_batch_norm4(self.dec_conv4(x)))  
-        x = F.relu(self.dec_batch_norm5(self.dec_conv5(x)))  
-        x = F.relu(self.dec_batch_norm6(self.dec_conv6(x)))  
+        x = F.gelu(self.dec_batch_norm2(self.dec_conv2(x)))  
+        print('shape', x.shape)
+        x = F.gelu(self.dec_batch_norm3(self.dec_conv3(x)))  
+        print('shape', x.shape)
+        x = F.gelu(self.dec_batch_norm4(self.dec_conv4(x)))  
+        print('shape', x.shape)
+        x = F.gelu(self.dec_batch_norm5(self.dec_conv5(x)))  
+        print('shape', x.shape)
+        x = F.gelu(self.dec_batch_norm6(self.dec_conv6(x)))  
+        print('shape', x.shape)
         x = self.dec_conv7(x)  # No batch norm on final layer
+        print('shape', x.shape)
         x = torch.tanh(x)
         return x
     

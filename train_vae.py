@@ -9,7 +9,7 @@ import wandb
 from einops import rearrange
 import cv2
 from video_dataset import VideoDataset
-from vae import create_vae, vae_loss
+from vae2 import create_vae2, vae_loss
 from utils import get_device
 import numpy as np
 from einops import rearrange
@@ -101,7 +101,7 @@ def train_vae(video_path: str,
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
     device = get_device()
-    vae = create_vae(input_channels=3, latent_dim=latent_dim, size=size).to(device)
+    vae = create_vae2(input_channels=3, latent_dim=latent_dim, size=size).to(device)
     
     # Register cleanup function with atexit
     atexit.register(cleanup_memory)
@@ -130,14 +130,24 @@ def train_vae(video_path: str,
         
         for batch_idx, frames in enumerate(pbar):
             optimizer.zero_grad()
-            
+
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
             x = rearrange(frames, 'b s c w h -> (b s) c w h')
+            print(f"Input shape: {x.shape}")
             recon_x, mu, logvar = vae(x)
+            print(f"Reconstruction shape: {recon_x.shape}")
+            print(f"Mu shape: {mu.shape}")
+            print(f"Logvar shape: {logvar.shape}")
             recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
-            mu = rearrange(mu, '(b s) c w h -> b s c w h', b=b)
-            logvar = rearrange(logvar, '(b s) c w h -> b s c w h', b=b)
+            
+            # Handle VAE2 per-patch latents: (b*s, n_patches, latent_dim) -> (b, s, n_patches, latent_dim)
+            if len(mu.shape) == 3:  # VAE2: (batch, n_patches, latent_dim)
+                mu = rearrange(mu, '(b s) n c -> b s n c', b=b)
+                logvar = rearrange(logvar, '(b s) n c -> b s n c', b=b)
+            else:  # Original VAE: (batch, latent_dim)
+                mu = rearrange(mu, '(b s) c -> b s c', b=b)
+                logvar = rearrange(logvar, '(b s) c -> b s c', b=b)
             loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
             loss.backward()
             optimizer.step()
