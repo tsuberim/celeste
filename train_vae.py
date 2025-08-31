@@ -250,7 +250,7 @@ if __name__ == "__main__":
     parser.add_argument("--size", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=50)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--beta", type=float, default=0.0)
     parser.add_argument("--save_dir", type=str, default="./models")
     
