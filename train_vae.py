@@ -134,11 +134,7 @@ def train_vae(video_path: str,
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
             x = rearrange(frames, 'b s c w h -> (b s) c w h')
-            print(f"Input shape: {x.shape}")
             recon_x, mu, logvar = vae(x)
-            print(f"Reconstruction shape: {recon_x.shape}")
-            print(f"Mu shape: {mu.shape}")
-            print(f"Logvar shape: {logvar.shape}")
             recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
             
             # Handle VAE2 per-patch latents: (b*s, n_patches, latent_dim) -> (b, s, n_patches, latent_dim)
