@@ -126,7 +126,7 @@ def train_vae(video_path: str,
     # Register cleanup function with atexit
     atexit.register(cleanup_memory)
     
-    optimizer = optim.Adam(vae.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(vae.parameters(), lr=learning_rate, weight_decay=0.01)
     
     # Add learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
