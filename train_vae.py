@@ -130,7 +130,7 @@ def train_vae(video_path: str,
     
     # Add learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, verbose=True
+        optimizer, mode='min', factor=0.5, patience=10
     )
     
     # Load checkpoint and training state if exists
