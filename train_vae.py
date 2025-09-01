@@ -123,6 +123,11 @@ def train_vae(video_path: str,
     device = get_device()
     vae = create_vae2(input_channels=3, latent_dim=latent_dim, size=size).to(device)
     
+    # Compile the model for faster training
+    print("Compiling VAE2 with torch.compile...")
+    vae = torch.compile(vae, mode="max-autotune", fullgraph=True)
+    print("VAE2 compiled successfully!")
+    
     # Register cleanup function with atexit
     atexit.register(cleanup_memory)
     
