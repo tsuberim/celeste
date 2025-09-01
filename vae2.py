@@ -183,7 +183,7 @@ class VAE2(nn.Module):
             elif isinstance(m, nn.Conv2d):
                 # Initialize conv layers to have no effect initially
                 if m.kernel_size == (3, 3) and m.padding == (1, 1):  # Refinement layers
-                    nn.init.constant_(m.weight, 0.0)
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0.0)
                 else:
