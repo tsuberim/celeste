@@ -139,7 +139,7 @@ class VAE2(nn.Module):
         # Transformer decoder
         self.decoder_blocks = nn.ModuleList([
             TransformerBlock(self.embed_dim, num_heads, mlp_ratio) 
-            for _ in range(num_layers // 2)  # Fewer decoder layers
+            for _ in range(num_layers * 2)  # Fewer decoder layers
         ])
         
         # Patch unembedding
