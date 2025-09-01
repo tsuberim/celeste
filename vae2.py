@@ -151,6 +151,17 @@ class VAE2(nn.Module):
             out_channels=input_channels
         )
         
+        # Convolutional refinement layers
+        self.refinement_layers = nn.Sequential(
+            nn.Conv2d(input_channels, 64, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 64),  # GroupNorm is better for conv layers
+            nn.GELU(),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 32),  # GroupNorm is better for conv layers
+            nn.GELU(),
+            nn.Conv2d(32, input_channels, kernel_size=3, padding=1)
+        )
+        
         # Initialize weights properly
         self._initialize_weights()
         
@@ -167,6 +178,20 @@ class VAE2(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv2d):
+                # Initialize conv layers to have no effect initially
+                if m.kernel_size == (3, 3) and m.padding == (1, 1):  # Refinement layers
+                    nn.init.constant_(m.weight, 0.0)
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0.0)
+                else:
+                    # Regular conv layers (patch embedding)
+                    nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                    if m.bias is not None:
+                        nn.init.constant_(m.bias, 0.0)
+            elif isinstance(m, nn.GroupNorm):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
         
@@ -216,6 +241,9 @@ class VAE2(nn.Module):
         # Resize to match input dimensions if needed
         if x.shape[2:] != (self.img_height, self.img_width):
             x = F.interpolate(x, size=(self.img_height, self.img_width), mode='bilinear', align_corners=False)
+        
+        # Apply convolutional refinement layers
+        x = x + self.refinement_layers(x)
         
         # Apply tanh activation
         x = torch.tanh(x)
