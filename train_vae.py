@@ -124,13 +124,13 @@ def train_vae(video_path: str,
     vae = create_vae2(input_channels=3, latent_dim=latent_dim, size=size).to(device)
     
     # Only compile if not using DataParallel (torch.compile doesn't work with DataParallel)
-    if torch.cuda.is_available() and not isinstance(vae, torch.nn.DataParallel):
-        # Compile the model for faster training
-        print("Compiling VAE2 with torch.compile...")
-        vae = torch.compile(vae, mode="max-autotune", fullgraph=True)
-        print("VAE2 compiled successfully!")
-    elif isinstance(vae, torch.nn.DataParallel):
-        print("Skipping torch.compile due to DataParallel usage")
+    # if torch.cuda.is_available() and not isinstance(vae, torch.nn.DataParallel):
+    #     # Compile the model for faster training
+    #     print("Compiling VAE2 with torch.compile...")
+    #     vae = torch.compile(vae, mode="max-autotune", fullgraph=True)
+    #     print("VAE2 compiled successfully!")
+    # elif isinstance(vae, torch.nn.DataParallel):
+    #     print("Skipping torch.compile due to DataParallel usage")
     
     # Register cleanup function with atexit
     atexit.register(cleanup_memory)
