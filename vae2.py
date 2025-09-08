@@ -304,11 +304,11 @@ def vae_loss(vae, frames, beta: float) -> Tensor:
 
     x = rearrange(frames, 'b s c w h -> (b s) c w h')
     recon_x, mu, logvar = vae(x)
+    
     recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
     mu = rearrange(mu, '(b s) n c -> b s n c', b=b)
     logvar = rearrange(logvar, '(b s) n c -> b s n c', b=b)
-    
-    recon_loss = F.mse_loss(recon_x, x, reduction='mean')
+    recon_loss = F.mse_loss(recon_x, frames, reduction='mean')
 
     logvar_clamped = torch.clamp(logvar, min=-20, max=20)
     kl_loss = -0.5 * beta * torch.mean(1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp())
@@ -320,7 +320,7 @@ def vae_loss(vae, frames, beta: float) -> Tensor:
     else:
         diff_loss = torch.tensor(0.0)
 
-    return recon_loss + kl_loss + diff_loss, recon_loss, kl_loss, diff_loss
+    return x, recon_x, recon_loss + kl_loss + diff_loss, recon_loss, kl_loss, diff_loss
 
 if __name__ == "__main__":
     import sys

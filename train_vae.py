@@ -185,7 +185,7 @@ def train_vae(video_path: str,
 
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
-            loss, recon_loss, kl_loss = vae_loss(vae, frames, beta)
+            x, recon_x, loss, recon_loss, kl_loss, diff_loss = vae_loss(vae, frames, beta)
             loss.backward()
             
             # Apply gradient clipping and get gradient norm
@@ -200,6 +200,7 @@ def train_vae(video_path: str,
                 "batch_loss": loss.item(),
                 "batch_recon_loss": recon_loss.item(),
                 "batch_kl_loss": kl_loss.item(),
+                "batch_diff_loss": diff_loss.item(),
                 "grad_norm": grad_norm,
                 "grad_clipped": grad_norm > max_grad_norm,
                 "epoch": epoch,
@@ -208,14 +209,15 @@ def train_vae(video_path: str,
             }, step=global_batch_idx)
             
             # Save every 100 batches
-            if (batch_idx + 0) % 100 == 0:
+            if batch_idx % 100 == 0:
                 save_model(vae, save_dir, epoch + 1, optimizer=optimizer, scheduler=scheduler,
                           global_batch_idx=global_batch_idx + 1, x=x, recon_x=recon_x, batch_idx=global_batch_idx + 1)
             
             pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}', 
                 'Recon Loss': f'{recon_loss.item():.4f}', 
-                'KL Loss': f'{kl_loss.item():.4f}'
+                'KL Loss': f'{kl_loss.item():.4f}',
+                'Diff Loss': f'{diff_loss.item():.4f}'
             })
             
             global_batch_idx += 1
