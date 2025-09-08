@@ -185,18 +185,7 @@ def train_vae(video_path: str,
 
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
-            x = rearrange(frames, 'b s c w h -> (b s) c w h')
-            recon_x, mu, logvar = vae(x)
-            recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
-            
-            # Handle VAE2 per-patch latents: (b*s, n_patches, latent_dim) -> (b, s, n_patches, latent_dim)
-            if len(mu.shape) == 3:  # VAE2: (batch, n_patches, latent_dim)
-                mu = rearrange(mu, '(b s) n c -> b s n c', b=b)
-                logvar = rearrange(logvar, '(b s) n c -> b s n c', b=b)
-            else:  # Original VAE: (batch, latent_dim)
-                mu = rearrange(mu, '(b s) c -> b s c', b=b)
-                logvar = rearrange(logvar, '(b s) c -> b s c', b=b)
-            loss, recon_loss, kl_loss = vae_loss(recon_x, frames, mu, logvar, beta)
+            loss, recon_loss, kl_loss = vae_loss(vae, frames, beta)
             loss.backward()
             
             # Apply gradient clipping and get gradient norm

@@ -299,12 +299,28 @@ def create_vae2(input_channels: int = 3, latent_dim: int = 128, size: int = 1) -
     
     return vae
 
-def vae_loss(recon_x: Tensor, x: Tensor, mu: Tensor, logvar: Tensor, beta: float) -> Tensor:
+def vae_loss(vae, frames, beta: float) -> Tensor:
+    b, s, c, h, w = frames.shape
+
+    x = rearrange(frames, 'b s c w h -> (b s) c w h')
+    recon_x, mu, logvar = vae(x)
+    recon_x = rearrange(recon_x, '(b s) c w h -> b s c w h', b=b)
+    mu = rearrange(mu, '(b s) n c -> b s n c', b=b)
+    logvar = rearrange(logvar, '(b s) n c -> b s n c', b=b)
+    
     recon_loss = F.mse_loss(recon_x, x, reduction='mean')
+
     logvar_clamped = torch.clamp(logvar, min=-20, max=20)
     kl_loss = -0.5 * beta * torch.mean(1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp())
-    total_loss = recon_loss + kl_loss
-    return total_loss, recon_loss, kl_loss
+
+    if s > 1:
+        frames_diff = frames[:, 1:] - frames[:, :-1]
+        recon_diff = recon_x[:, 1:] - recon_x[:, :-1]
+        diff_loss = F.mse_loss(frames_diff, recon_diff, reduction='mean')
+    else:
+        diff_loss = torch.tensor(0.0)
+
+    return recon_loss + kl_loss + diff_loss, recon_loss, kl_loss, diff_loss
 
 if __name__ == "__main__":
     import sys
