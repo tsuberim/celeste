@@ -74,7 +74,8 @@ def encode_video_to_h5(video_path: str,
     sample_tensor = torch.from_numpy(sample_frame).unsqueeze(0).float().to(device)
     
     with torch.no_grad():
-        mu, logvar = vae.encode(sample_tensor)
+        # Use forward pass with encode_only flag (benefits from DataParallel, skips decoding)
+        _, mu, logvar = vae(sample_tensor, encode_only=True)
         n_patches, latent_dim_actual = mu.shape[1], mu.shape[2]
     
     print(f"Frame shape: {sample_frame.shape}")
@@ -120,8 +121,8 @@ def encode_video_to_h5(video_path: str,
                 # Convert to tensor and move to device
                 batch_tensor = torch.from_numpy(np.stack(batch_frames)).float().to(device)
                 
-                # Encode batch
-                mu_batch, logvar_batch = vae.encode(batch_tensor)
+                # Encode batch using forward pass with encode_only flag (benefits from DataParallel, skips decoding)
+                _, mu_batch, logvar_batch = vae(batch_tensor, encode_only=True)
                 
                 # Store in H5 file
                 mu_dataset[start_idx:end_idx] = mu_batch.cpu().numpy()

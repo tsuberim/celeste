@@ -250,8 +250,10 @@ class VAE2(nn.Module):
         
         return x
     
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    def forward(self, x: Tensor, encode_only: bool = False) -> Tuple[Tensor, Tensor, Tensor]:
         mu, logvar = self.encode(x)  
+        if encode_only:
+            return None, mu, logvar
         z = reparameterize(mu, logvar)
         x_recon = self.decode(z)
         return x_recon, mu, logvar

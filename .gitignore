@@ -3,3 +3,13 @@ __pycache__
 videos
 models
 wandb
+*.safetensors
+*.pt
+*.pth
+*.h5
+*.mp4
+*.avi
+*.mov
+*.flv
+*.wmv
+*.mkv
