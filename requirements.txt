@@ -8,3 +8,4 @@ torch>=2.0.0
 safetensors>=0.4.0
 wandb>=0.15.0
 huggingface_hub[cli]
+h5py>=3.8.0
