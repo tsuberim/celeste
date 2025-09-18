@@ -322,7 +322,16 @@ def vae_loss(vae, frames, beta: float) -> Tensor:
     else:
         diff_loss = torch.tensor(0.0)
 
-    return x, recon_x, recon_loss + kl_loss + diff_loss, recon_loss, kl_loss, diff_loss
+    return dict(
+        x=x, 
+        recon_x=recon_x, 
+        recon_loss=recon_loss, 
+        kl_loss=kl_loss, 
+        diff_loss=diff_loss,
+        loss=recon_loss + kl_loss + diff_loss, 
+        mu=mu,
+        logvar=logvar
+    )
 
 if __name__ == "__main__":
     import sys
@@ -344,13 +353,9 @@ if __name__ == "__main__":
     if len(dataset) > 0:
         frames = dataset[0]  # Get first sequence
         print(f"Input frames shape: {frames.shape}")
-        
-        x = torch.from_numpy(frames).unsqueeze(0).float()  # (1, 8, 3, 320, 180)
-        
-        x = x[0, 0]  # (3, 320, 180)
-        x = x.unsqueeze(0)  # (1, 3, 320, 180)
-        
-        print(f"Single frame shape: {x.shape}")
+
+        x = torch.from_numpy(frames).float()  # (8, 3, 320, 180)
+        x = x.unsqueeze(0)  # (1, 8, 3, 320, 180)
         
         latent_dim = 16
         vae = create_vae2(input_channels=3, latent_dim=latent_dim, size=2)
@@ -360,22 +365,18 @@ if __name__ == "__main__":
         x = x.to(device)
         print(f"Moved model and input to device: {device}")
         
-        recon_x, mu, logvar = vae(x)
-        
-        print(f"Input shape: {x.shape}")
-        print(f"Reconstruction shape: {recon_x.shape}")
-        print(f"Mu shape: {mu.shape}")
-        print(f"Logvar shape: {logvar.shape}")
-        
-        total_loss, recon_loss, kl_loss = vae_loss(recon_x, x, mu, logvar, beta=1.0)
+        loss_dict = vae_loss(vae, x, beta=1.0)
+        total_loss = loss_dict['loss']
+        recon_loss = loss_dict['recon_loss']
+        kl_loss = loss_dict['kl_loss']
+        diff_loss = loss_dict['diff_loss']
+        mu = loss_dict['mu']
+        logvar = loss_dict['logvar']
         print(f"Total loss: {total_loss:.4f}")
         print(f"Reconstruction loss: {recon_loss:.4f}")
         print(f"KL loss: {kl_loss:.4f}")
-        
-        with torch.no_grad():
-            mu, logvar = vae.encode(x)
-            print(f"Latent shape: {mu.shape}")  # Should be (1, n_patches, latent_dim)
-            print(f"Logvar shape: {logvar.shape}")  # Should be (1, n_patches, latent_dim)
+        print(f"Latent shape: {mu.shape}")  # Should be (1, n_patches, latent_dim)
+        print(f"Logvar shape: {logvar.shape}")  # Should be (1, n_patches, latent_dim)
             
     else:
         print("No sequences in dataset")

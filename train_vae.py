@@ -185,7 +185,13 @@ def train_vae(video_path: str,
 
             b, s, c, h, w = frames.shape
             frames = frames.to(device)
-            x, recon_x, loss, recon_loss, kl_loss, diff_loss = vae_loss(vae, frames, beta)
+            loss_dict = vae_loss(vae, frames, beta)
+            loss = loss_dict['loss']
+            recon_loss = loss_dict['recon_loss']
+            kl_loss = loss_dict['kl_loss']
+            diff_loss = loss_dict['diff_loss']
+            x = loss_dict['x']
+            recon_x = loss_dict['recon_x']
             loss.backward()
             
             # Apply gradient clipping and get gradient norm
