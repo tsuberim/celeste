@@ -283,8 +283,6 @@ def save_video(frames: torch.Tensor, output_path: str, fps: int = 24):
         success = video_writer.write(frame_bgr)
         if success:
             frames_written += 1
-        else:
-            print(f"  ⚠️  Failed to write frame {frame_idx}")
     
     video_writer.release()
     cv2.destroyAllWindows()
