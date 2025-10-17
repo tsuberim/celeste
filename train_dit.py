@@ -237,8 +237,8 @@ def train_dit(dataset_path: str,
                 # Backward pass
                 loss.backward()
                 
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=1.0)
+                # Gradient clipping and get grad norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=5.0)
                 
                 optimizer.step()
                 
@@ -252,7 +252,8 @@ def train_dit(dataset_path: str,
                 pbar.set_postfix({
                     'loss': f"{loss.item():.4f}",
                     'avg_loss': f"{running_loss / (batch_idx + 1):.4f}",
-                    'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
+                    'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
+                    'grad_norm': f"{grad_norm:.3f}"
                 })
                 
                 # Log to wandb every batch
@@ -260,6 +261,7 @@ def train_dit(dataset_path: str,
                     'train/loss': loss.item(),
                     'train/avg_loss': running_loss / (batch_idx + 1),
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
+                    'train/grad_norm': grad_norm.item(),
                     'train/epoch': epoch,
                     'train/global_step': global_batch_idx
                 })
