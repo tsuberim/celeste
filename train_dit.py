@@ -315,11 +315,12 @@ def train_dit(dataset_path: str,
                 )
                 
                 if video_array is not None:
-                    # Log all videos as a batch to wandb - WandB will encode to browser-compatible format
-                    wandb.log({
-                        'generated_videos': wandb.Video(video_array, fps=12, format="mp4"),
-                        'epoch/number': epoch + 1
-                    })
+                    # Log each video separately to wandb - WandB will encode to browser-compatible format
+                    for i in range(video_array.shape[0]):
+                        wandb.log({
+                            f'generated_video_{i}': wandb.Video(video_array[i], fps=12, format="mp4"),
+                            'epoch/number': epoch + 1
+                        })
                     print(f"Logged {video_array.shape[0]} video samples to wandb")
             except Exception as e:
                 print(f"Failed to generate video sample: {e}")
