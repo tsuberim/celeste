@@ -316,15 +316,30 @@ def train_dit(dataset_path: str,
                 )
                 
                 if video_paths:
-                    # Log all 4 videos to wandb
+                    # Log all 4 videos to wandb as numpy arrays (WandB handles encoding)
                     for i, vpath in enumerate(video_paths):
                         if os.path.exists(vpath):
-                            # Detect format from file extension
-                            video_format = "mp4" if vpath.endswith('.mp4') else "avi"
-                            wandb.log({
-                                f'generated_video_{i}': wandb.Video(vpath, fps=12, format=video_format),
-                                'epoch/number': epoch + 1
-                            })
+                            # Read video as numpy array and let WandB encode it
+                            import cv2
+                            cap = cv2.VideoCapture(vpath)
+                            frames = []
+                            while True:
+                                ret, frame = cap.read()
+                                if not ret:
+                                    break
+                                # Convert BGR to RGB
+                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                                frames.append(frame_rgb)
+                            cap.release()
+                            
+                            if frames:
+                                # Log as numpy array - WandB will encode to browser-compatible format
+                                video_array = np.array(frames)  # (T, H, W, C)
+                                wandb.log({
+                                    f'generated_video_{i}': wandb.Video(video_array, fps=12, format="mp4"),
+                                    'epoch/number': epoch + 1
+                                })
+                            
                             os.remove(vpath)
                     print(f"Logged {len(video_paths)} video samples to wandb")
             except Exception as e:
