@@ -475,23 +475,20 @@ def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: i
     decoded_frames = decoded_frames.reshape(B, N, *decoded_frames.shape[1:])  # (batch_size, num_frames, C, W, H)
     
     if return_arrays:
-        # Return as numpy arrays for direct WandB logging
-        video_arrays = []
-        for i in range(batch_size):
-            # Get frames for this video (N, C, W, H)
-            video_frames = decoded_frames[i].cpu().numpy()
-            
-            # Denormalize from [-1, 1] to [0, 255]
-            video_frames = (video_frames + 1.0) / 2.0
-            video_frames = np.clip(video_frames, 0, 1)
-            video_frames = (video_frames * 255).astype(np.uint8)
-            
-            # Convert from (N, C, W, H) to (N, H, W, C)
-            video_frames = video_frames.transpose(0, 2, 3, 1)
-            
-            video_arrays.append(video_frames)
+        # Return as numpy array for direct WandB logging
+        # decoded_frames is (batch_size, num_frames, C, W, H)
+        video_array = decoded_frames.cpu().numpy()
         
-        return video_arrays
+        # Denormalize from [-1, 1] to [0, 255]
+        video_array = (video_array + 1.0) / 2.0
+        video_array = np.clip(video_array, 0, 1)
+        video_array = (video_array * 255).astype(np.uint8)
+        
+        # VAE outputs (batch, frames, C, W, H) but WandB needs (batch, frames, C, H, W)
+        # Swap W and H: axis 3 and 4
+        video_array = video_array.transpose(0, 1, 2, 4, 3)
+        
+        return video_array
     else:
         # Save each video as a separate MP4
         video_paths = []

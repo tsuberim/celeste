@@ -297,8 +297,8 @@ def train_dit(dataset_path: str,
                 prompt_sequences = torch.stack(sampled_prompts, dim=0)
                 print(f"Sampled prompt sequences: {prompt_sequences.shape}")
                 
-                # Generate videos and get as numpy arrays directly
-                video_arrays = generate_and_save_video(
+                # Generate videos and get as numpy array directly (batch, frames, C, H, W)
+                video_array = generate_and_save_video(
                     dit_model=dit_model,
                     vae_model=vae_model,
                     video_path=None,  # Not used when return_arrays=True
@@ -314,14 +314,13 @@ def train_dit(dataset_path: str,
                     return_arrays=True
                 )
                 
-                if video_arrays:
-                    # Log all 4 videos to wandb - WandB will encode to browser-compatible format
-                    for i, video_array in enumerate(video_arrays):
-                        wandb.log({
-                            f'generated_video_{i}': wandb.Video(video_array, fps=12, format="mp4"),
-                            'epoch/number': epoch + 1
-                        })
-                    print(f"Logged {len(video_arrays)} video samples to wandb")
+                if video_array is not None:
+                    # Log all videos as a batch to wandb - WandB will encode to browser-compatible format
+                    wandb.log({
+                        'generated_videos': wandb.Video(video_array, fps=12, format="mp4"),
+                        'epoch/number': epoch + 1
+                    })
+                    print(f"Logged {video_array.shape[0]} video samples to wandb")
             except Exception as e:
                 print(f"Failed to generate video sample: {e}")
         
