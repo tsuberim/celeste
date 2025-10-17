@@ -255,14 +255,14 @@ def train_dit(dataset_path: str,
                     'lr': f"{optimizer.param_groups[0]['lr']:.2e}"
                 })
                 
-                # Log to wandb every 10 batches
-                if global_batch_idx % 10 == 0:
-                    wandb.log({
-                        'train/loss': loss.item(),
-                        'train/learning_rate': optimizer.param_groups[0]['lr'],
-                        'train/epoch': epoch,
-                        'train/global_step': global_batch_idx
-                    })
+                # Log to wandb every batch
+                wandb.log({
+                    'train/loss': loss.item(),
+                    'train/avg_loss': running_loss / (batch_idx + 1),
+                    'train/learning_rate': optimizer.param_groups[0]['lr'],
+                    'train/epoch': epoch,
+                    'train/global_step': global_batch_idx
+                })
         
         # Calculate epoch averages
         avg_epoch_loss = epoch_loss / len(dataloader)
