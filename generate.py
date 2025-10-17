@@ -241,22 +241,26 @@ def save_video(frames: torch.Tensor, output_path: str, fps: int = 24):
     # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
     
-    # Use H.264 codec for better compatibility
-    fourcc = cv2.VideoWriter_fourcc(*'H264')
-    video_writer = cv2.VideoWriter(output_path, fourcc, float(fps), (width, height), True)
+    # Try codecs in order: mp4v (most compatible), then H264, then XVID
+    codecs_to_try = [
+        ('mp4v', output_path),  # MPEG-4 - most compatible, works without extra deps
+        ('H264', output_path),  # H.264 - requires ffmpeg
+        ('avc1', output_path),  # H.264 alternative
+        ('XVID', output_path.replace('.mp4', '.avi')),  # Xvid fallback
+    ]
     
-    # Check if video writer was successfully initialized
-    if not video_writer.isOpened():
-        print(f"  ❌ Failed to open video writer with H264")
-        print(f"  🔄 Trying alternative codec...")
-        # Try alternative codec
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        output_path_alt = output_path.replace('.mp4', '.avi')
-        video_writer = cv2.VideoWriter(output_path_alt, fourcc, float(fps), (width, height), True)
-        output_path = output_path_alt
+    video_writer = None
+    for fourcc_str, path in codecs_to_try:
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        video_writer = cv2.VideoWriter(path, fourcc, float(fps), (width, height), True)
+        if video_writer.isOpened():
+            output_path = path
+            print(f"  ✅ Using codec: {fourcc_str}")
+            break
+        video_writer.release()
     
-    if not video_writer.isOpened():
-        raise RuntimeError(f"Failed to initialize video writer for {output_path}")
+    if video_writer is None or not video_writer.isOpened():
+        raise RuntimeError(f"Failed to initialize video writer - no compatible codec found")
     
     frames_written = 0
     for frame_idx in tqdm(range(num_frames), desc="Writing video"):

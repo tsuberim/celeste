@@ -319,8 +319,10 @@ def train_dit(dataset_path: str,
                     # Log all 4 videos to wandb
                     for i, vpath in enumerate(video_paths):
                         if os.path.exists(vpath):
+                            # Detect format from file extension
+                            video_format = "mp4" if vpath.endswith('.mp4') else "avi"
                             wandb.log({
-                                f'generated_video_{i}': wandb.Video(vpath, fps=12, format="mp4"),
+                                f'generated_video_{i}': wandb.Video(vpath, fps=12, format=video_format),
                                 'epoch/number': epoch + 1
                             })
                             os.remove(vpath)
