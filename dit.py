@@ -351,25 +351,14 @@ def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_co
     noise_weight = torch.clamp(torch.exp(-(w / (seq_len - past_context_length))*(video_t - t_unsqueezed)), max=1.0).unsqueeze(2).unsqueeze(3)
     x_t = (1 - noise_weight) * prior + noise_weight * batch
     # Predict velocity field (pass 1D t to model)
-    v_pred = model(x_t, t, use_causal_mask=False)
+    v_pred = model(x_t, t, use_causal_mask=True)
     
     # True velocity is data - noise
     v_target = batch - prior
 
     loss = torch.nn.functional.mse_loss(v_pred[:, past_context_length:], v_target[:, past_context_length:])    
     return loss
-
-# toy
-# def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_context_length: int):
-#     batch_size, seq_len, n_patches, latent_dim = batch.shape
-#     prior = torch.randn_like(batch)
-#     t = torch.rand(batch_size, device=batch.device)  # (batch_size,)
-#     t_broadcast = t.view(-1, 1, 1, 1)  # (batch_size, 1, 1, 1)
-#     x_t = (1 - t_broadcast) * prior + t_broadcast * batch
-#     v_pred = model(x_t, t, use_causal_mask=False)  # Pass 1D t to model
-#     v_target = batch - prior
-#     return torch.nn.functional.mse_loss(v_pred, v_target)
-
+    
 def test_dit():
     """Test the DiT model with dummy data"""
     print("Testing Diffusion Transformer...")
