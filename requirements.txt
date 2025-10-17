@@ -9,3 +9,8 @@ safetensors>=0.4.0
 wandb>=0.15.0
 huggingface_hub[cli]
 h5py>=3.8.0
+torchtune>=0.1.0
+torchao
+scipy>=1.9.0
+torchdiffeq>=0.2.3
+imageio
