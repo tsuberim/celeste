@@ -297,13 +297,11 @@ def train_dit(dataset_path: str,
                 prompt_sequences = torch.stack(sampled_prompts, dim=0)
                 print(f"Sampled prompt sequences: {prompt_sequences.shape}")
                 
-                with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_video:
-                    video_path = tmp_video.name
-                
-                video_paths = generate_and_save_video(
+                # Generate videos and get as numpy arrays directly
+                video_arrays = generate_and_save_video(
                     dit_model=dit_model,
                     vae_model=vae_model,
-                    video_path=video_path,
+                    video_path=None,  # Not used when return_arrays=True
                     num_frames=32,
                     past_context_length=past_context_length,
                     max_seq_len=max_seq_len,
@@ -312,36 +310,18 @@ def train_dit(dataset_path: str,
                     fps=12,
                     device=device,
                     batch_size=prompt_batch_size,
-                    prompt_sequences=prompt_sequences
+                    prompt_sequences=prompt_sequences,
+                    return_arrays=True
                 )
                 
-                if video_paths:
-                    # Log all 4 videos to wandb as numpy arrays (WandB handles encoding)
-                    for i, vpath in enumerate(video_paths):
-                        if os.path.exists(vpath):
-                            # Read video as numpy array and let WandB encode it
-                            import cv2
-                            cap = cv2.VideoCapture(vpath)
-                            frames = []
-                            while True:
-                                ret, frame = cap.read()
-                                if not ret:
-                                    break
-                                # Convert BGR to RGB
-                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                frames.append(frame_rgb)
-                            cap.release()
-                            
-                            if frames:
-                                # Log as numpy array - WandB will encode to browser-compatible format
-                                video_array = np.array(frames)  # (T, H, W, C)
-                                wandb.log({
-                                    f'generated_video_{i}': wandb.Video(video_array, fps=12, format="mp4"),
-                                    'epoch/number': epoch + 1
-                                })
-                            
-                            os.remove(vpath)
-                    print(f"Logged {len(video_paths)} video samples to wandb")
+                if video_arrays:
+                    # Log all 4 videos to wandb - WandB will encode to browser-compatible format
+                    for i, video_array in enumerate(video_arrays):
+                        wandb.log({
+                            f'generated_video_{i}': wandb.Video(video_array, fps=12, format="mp4"),
+                            'epoch/number': epoch + 1
+                        })
+                    print(f"Logged {len(video_arrays)} video samples to wandb")
             except Exception as e:
                 print(f"Failed to generate video sample: {e}")
         

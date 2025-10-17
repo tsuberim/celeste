@@ -425,14 +425,15 @@ def main():
 def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 32, 
                          past_context_length: int = 16, max_seq_len: int = 32, 
                          n_patches: int = 220, latent_dim: int = 48, fps: int = 12, device=None,
-                         batch_size: int = 4, prompt_sequences: torch.Tensor = None):
+                         batch_size: int = 4, prompt_sequences: torch.Tensor = None,
+                         return_arrays: bool = False):
     """
-    Generate video frames and save as MP4 (for wandb logging)
+    Generate video frames and optionally save as MP4 or return as numpy arrays
     
     Args:
         dit_model: Trained DiT model
         vae_model: Trained VAE model
-        video_path: Path to save MP4 video
+        video_path: Path to save MP4 video (ignored if return_arrays=True)
         num_frames: Number of frames to generate
         past_context_length: Context length for generation
         max_seq_len: Maximum sequence length
@@ -440,9 +441,13 @@ def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: i
         latent_dim: Latent dimension
         fps: Frames per second
         device: Device to use
+        batch_size: Number of videos to generate
+        prompt_sequences: Optional prompt sequences
+        return_arrays: If True, return numpy arrays instead of saving to files
         
     Returns:
-        List of paths to saved MP4 videos
+        If return_arrays=True: List of numpy arrays (N, H, W, C) in [0, 255] uint8
+        If return_arrays=False: List of paths to saved MP4 videos
     """
     if device is None:
         device = get_device()
@@ -467,27 +472,46 @@ def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: i
     B, N, P, L = encoded_frames.shape
     encoded_flat = encoded_frames.reshape(B * N, P, L)
     decoded_frames = decode_frames_with_vae(encoded_flat, vae_model, device=device, batch_size=8)
-    decoded_frames = decoded_frames.reshape(B, N, *decoded_frames.shape[1:])  # (batch_size, num_frames, C, H, W)
+    decoded_frames = decoded_frames.reshape(B, N, *decoded_frames.shape[1:])  # (batch_size, num_frames, C, W, H)
     
-    # Save each video as a separate MP4
-    video_paths = []
-    try:
+    if return_arrays:
+        # Return as numpy arrays for direct WandB logging
+        video_arrays = []
         for i in range(batch_size):
-            # Get frames for this video
-            video_frames = decoded_frames[i]  # (N, C, W, H)
+            # Get frames for this video (N, C, W, H)
+            video_frames = decoded_frames[i].cpu().numpy()
             
-            # Create path for this video
-            base_path = video_path.replace('.mp4', f'_{i}.mp4')
+            # Denormalize from [-1, 1] to [0, 255]
+            video_frames = (video_frames + 1.0) / 2.0
+            video_frames = np.clip(video_frames, 0, 1)
+            video_frames = (video_frames * 255).astype(np.uint8)
             
-            # Save using the save_video function
-            save_video(video_frames, base_path, fps=fps)
-            video_paths.append(base_path)
-            print(f"Saved MP4 {i+1}/{batch_size} to {base_path}")
+            # Convert from (N, C, W, H) to (N, H, W, C)
+            video_frames = video_frames.transpose(0, 2, 3, 1)
+            
+            video_arrays.append(video_frames)
         
-        return video_paths
-    except Exception as e:
-        print(f"Failed to save MP4s: {e}")
-        return None
+        return video_arrays
+    else:
+        # Save each video as a separate MP4
+        video_paths = []
+        try:
+            for i in range(batch_size):
+                # Get frames for this video
+                video_frames = decoded_frames[i]  # (N, C, W, H)
+                
+                # Create path for this video
+                base_path = video_path.replace('.mp4', f'_{i}.mp4')
+                
+                # Save using the save_video function
+                save_video(video_frames, base_path, fps=fps)
+                video_paths.append(base_path)
+                print(f"Saved MP4 {i+1}/{batch_size} to {base_path}")
+            
+            return video_paths
+        except Exception as e:
+            print(f"Failed to save MP4s: {e}")
+            return None
 
 
 if __name__ == "__main__":
