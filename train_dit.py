@@ -257,19 +257,12 @@ def train_dit(dataset_path: str,
                 })
                 
                 # Log to wandb every batch
-                # Compute mean velocity scale for logging (evaluate at t=0.5 as representative)
-                with torch.no_grad():
-                    t_mid = torch.tensor([0.5], device=device)
-                    t_emb_mid = dit_model.get_timestep_embedding(t_mid)
-                    t_emb_mid = dit_model.time_mlp(t_emb_mid)
-                    vel_scale_mid = dit_model.velocity_scale_mlp(t_emb_mid).item()
-                
                 wandb.log({
                     'train/loss': loss.item(),
                     'train/avg_loss': running_loss / (batch_idx + 1),
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
                     'train/grad_norm': grad_norm.item(),
-                    'train/velocity_scale_t0.5': vel_scale_mid,
+                    'train/velocity_scale': dit_model.velocity_scale.item(),
                     'train/epoch': epoch,
                     'train/global_step': global_batch_idx
                 })

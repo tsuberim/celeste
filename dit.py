@@ -205,14 +205,8 @@ class DiffusionTransformer(nn.Module):
         # Layer norm
         self.norm = nn.LayerNorm(embed_dim)
 
-        # Velocity scale as a function of t: scale_mlp(t_emb) -> scalar
-        # This allows the model to learn time-dependent velocity scaling
-        self.velocity_scale_mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.SiLU(),
-            nn.Linear(embed_dim // 2, 1),
-            nn.Softplus()  # Ensure positive scale
-        )
+        # Learnable velocity scale
+        self.velocity_scale = nn.Parameter(torch.tensor(2.0))
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -309,11 +303,8 @@ class DiffusionTransformer(nn.Module):
         # Reshape to patch format (no residual - we're predicting velocities, not corrections)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
         
-        # Compute time-dependent velocity scale
-        velocity_scale = self.velocity_scale_mlp(t_emb)  # (batch_size, 1)
-        velocity_scale = velocity_scale.unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, 1) for broadcasting
-        
-        output = output * velocity_scale
+        # Apply learnable velocity scale
+        output = output * self.velocity_scale
         return output
     
 
