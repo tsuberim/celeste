@@ -294,7 +294,7 @@ class DiffusionTransformer(nn.Module):
         
         # Add time conditioning: broadcast time embedding across sequence
         # This tells the model what timestep t it's at in the flow
-        x_emb = x_emb + t_emb.unsqueeze(1)  # (batch_size, seq_len, embed_dim)
+        # x_emb = x_emb + t_emb.unsqueeze(1)  # (batch_size, seq_len, embed_dim)
         
         # Create causal mask if needed
         attn_mask = None
