@@ -39,11 +39,11 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             base=10000
         )
     
-    def forward(self, x: Tensor, attn_mask: Optional[Tensor] = None) -> Tensor:
+    def forward(self, x: Tensor, use_causal: bool = False) -> Tensor:
         """
         Args:
             x: (batch_size, seq_len, embed_dim)
-            attn_mask: Optional attention mask
+            use_causal: Whether to use causal masking
         """
         B, T, C = x.shape
         
@@ -64,11 +64,10 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         q = rearrange(q, 'b t h d -> b h t d')
         k = rearrange(k, 'b t h d -> b h t d')
         
-        # Use PyTorch's optimized scaled_dot_product_attention
-        # It handles the attn_mask (whether it's a causal mask or None) correctly
+        # Use PyTorch's optimized scaled_dot_product_attention with built-in causal masking
         out = F.scaled_dot_product_attention(
             q, k, v,
-            attn_mask=attn_mask,  # Pass the mask directly
+            is_causal=use_causal,  # Use PyTorch's built-in causal masking
             dropout_p=self.dropout.p if self.training else 0.0
         )
         
@@ -113,14 +112,14 @@ class DiTBlock(nn.Module):
             nn.Linear(embed_dim * 4, embed_dim * 4)  # 2 * embed_dim for each of 2 norms
         )
     
-    def forward(self, x: Tensor, t_emb: Tensor, attn_mask: Optional[Tensor] = None) -> Tensor:
+    def forward(self, x: Tensor, t_emb: Tensor, use_causal: bool = False) -> Tensor:
         """
         Forward pass with FiLM time conditioning
         
         Args:
             x: Input tensor (batch_size, seq_len, embed_dim)
             t_emb: Time embeddings (batch_size, embed_dim)
-            attn_mask: Optional attention mask
+            use_causal: Whether to use causal masking
             
         Returns:
             Output tensor (batch_size, seq_len, embed_dim)
@@ -138,7 +137,7 @@ class DiTBlock(nn.Module):
         # Attention block with FiLM conditioning
         h1 = self.norm1(x)
         h1 = h1 * (1 + scale1) + shift1  # FiLM modulation
-        h1 = self.attn(h1, attn_mask)
+        h1 = self.attn(h1, use_causal)
         x = x + h1
         
         # Feed-forward block with FiLM conditioning
@@ -206,7 +205,14 @@ class DiffusionTransformer(nn.Module):
         # Layer norm
         self.norm = nn.LayerNorm(embed_dim)
 
-        self.velocity_scale = nn.Parameter(torch.tensor(2.0))
+        # Velocity scale as a function of t: scale_mlp(t_emb) -> scalar
+        # This allows the model to learn time-dependent velocity scaling
+        self.velocity_scale_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.SiLU(),
+            nn.Linear(embed_dim // 2, 1),
+            nn.Softplus()  # Ensure positive scale
+        )
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -232,12 +238,6 @@ class DiffusionTransformer(nn.Module):
                 torch.nn.init.zeros_(module.bias)
             if module.weight is not None:
                 torch.nn.init.ones_(module.weight)
-    
-    def create_causal_mask(self, seq_len: int, device: torch.device) -> Tensor:
-        """Create causal attention mask for scaled_dot_product_attention"""
-        # Create upper triangular mask (True = mask out, False = keep)
-        mask = torch.triu(torch.ones(seq_len, seq_len, device=device, dtype=torch.bool), diagonal=1)
-        return mask
     
     def get_timestep_embedding(self, timesteps: Tensor) -> Tensor:
         """
@@ -296,24 +296,24 @@ class DiffusionTransformer(nn.Module):
         # This tells the model what timestep t it's at in the flow
         # x_emb = x_emb + t_emb.unsqueeze(1)  # (batch_size, seq_len, embed_dim)
         
-        # Create causal mask if needed
-        attn_mask = None
-        if use_causal_mask:
-            attn_mask = self.create_causal_mask(seq_len, x.device)
-        
-        # Apply transformer blocks (time conditioning already added to input)
+        # Apply transformer blocks with causal flag
         for block in self.blocks:
-            x_emb = block(x_emb, t_emb, attn_mask)
+            x_emb = block(x_emb, t_emb, use_causal_mask)
         
         # Layer norm (let's try to remove this)
-        x_emb = self.norm(x_emb)
+        # x_emb = self.norm(x_emb)
         
         # Project back to latent space for all sequence positions
         output = self.output_proj(x_emb)  # (batch_size, seq_len, n_patches * latent_dim)
         
         # Reshape to patch format (no residual - we're predicting velocities, not corrections)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
-        output = output * self.velocity_scale
+        
+        # Compute time-dependent velocity scale
+        velocity_scale = self.velocity_scale_mlp(t_emb)  # (batch_size, 1)
+        velocity_scale = velocity_scale.unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, 1) for broadcasting
+        
+        output = output * velocity_scale
         return output
     
 
