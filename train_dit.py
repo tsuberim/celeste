@@ -88,7 +88,7 @@ def train_dit(dataset_path: str,
               learning_rate: float = 1e-3,
               save_dir: str = "./models",
               max_frames: int = None,
-              past_context_length: int = 31):
+              past_context_length: int = 8):
     """Train DiT on encoded video dataset"""
     
     # Initialize wandb
@@ -374,7 +374,7 @@ def main():
                        help="Directory to save model checkpoints")
     parser.add_argument("--max_frames", type=int, default=None,
                        help="Maximum number of frames to load from dataset (None for all)")
-    parser.add_argument("--past_context_length", type=int, default=31,
+    parser.add_argument("--past_context_length", type=int, default=8,
                        help="Past context length")
     args = parser.parse_args()
     
