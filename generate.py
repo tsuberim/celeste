@@ -333,7 +333,7 @@ def main():
                        help="Number of attention heads")
     parser.add_argument("--num_layers", type=int, default=16,
                        help="Number of transformer layers")
-    parser.add_argument("--embed_dim", type=int, default=1024,
+    parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
     parser.add_argument("--prompt_video", type=str, default=None,
                        help="Path to video file to use as prompt (optional)")
