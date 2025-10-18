@@ -108,7 +108,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
-            dropout_p=self.dropout.p if self.training else 0.0
+            dropout_p=self.dropout.p if self.training else 0.0,
+            enable_gqa=True
         )
         
         # Reshape output
