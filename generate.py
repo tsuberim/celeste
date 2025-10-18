@@ -57,8 +57,8 @@ class ODEFlowSolver:
             t_span=t_span,
             method='DOP853',  # Dormand-Prince 8(5,3)
             t_eval=t_eval,
-            rtol=1e-2,
-            atol=1e-3,
+            rtol=1e-1,
+            atol=1e-2,
         )
         # def euler_solve_mps(x0, steps=30):
         #     x = x0
