@@ -268,7 +268,7 @@ class DiffusionTransformer(nn.Module):
             
         return emb
     
-    def forward(self, x: Tensor, t: Tensor = None, use_causal_mask: bool = False) -> Tensor:
+    def forward(self, x: Tensor, t: Tensor = None, use_causal_mask: bool = True) -> Tensor:
         """
         Forward pass for sequence prediction
         
@@ -382,6 +382,40 @@ def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_co
 
     loss = torch.nn.functional.mse_loss(v_pred[:, past_context_length:], v_target[:, past_context_length:])    
     return loss
+    
+
+def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor):
+    """
+    Vanilla flow matching loss for training DiT model, without special handling of context frames
+    
+    Args:
+        model: DiffusionTransformer model
+        batch: Input sequences (batch_size, seq_len, n_patches, latent_dim)
+        
+    Returns:
+        Flow matching loss
+    """
+    batch_size = batch.shape[0]
+    
+    # Sample noise
+    prior = torch.randn_like(batch)
+    
+    # Sample time uniformly from [0, 1] for each batch item
+    t = torch.rand(batch_size, device=batch.device)
+    
+    # Linear interpolation between prior and data
+    x_t = (1 - t.view(-1, 1, 1, 1)) * prior + t.view(-1, 1, 1, 1) * batch
+    
+    # Predict velocity field
+    v_pred = model(x_t, t)
+    
+    # True velocity is data - noise
+    v_target = batch - prior
+    
+    # Simple MSE loss between predicted and target velocities
+    loss = torch.nn.functional.mse_loss(v_pred, v_target)
+    return loss
+
     
 def test_dit():
     """Test the DiT model with dummy data"""
