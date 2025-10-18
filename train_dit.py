@@ -308,7 +308,7 @@ def train_dit(dataset_path: str,
                                 dit_model=dit_model,
                                 vae_model=vae_model,
                                 video_path=None,  # Not used when return_arrays=True
-                                num_frames=32,
+                                num_frames=16,
                                 past_context_length=past_context_length,
                                 max_seq_len=max_seq_len,
                                 n_patches=n_patches,
