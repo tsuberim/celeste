@@ -12,6 +12,7 @@ import atexit
 from safetensors.torch import save_file, load_file
 import tempfile
 import time
+import math
 
 from encoded_dataset import EncodedDataset
 from dit import create_dit, DiffusionTransformer, flow_matching_loss
@@ -33,7 +34,7 @@ def cleanup_memory():
     print("Memory cleanup completed via atexit")
 
 
-def save_model(dit_model, save_dir: str, epoch: int, optimizer=None, scheduler=None, 
+def save_model(dit_model, save_dir: str, epoch: int, optimizer=None,
                global_batch_idx=None, hyperparams=None):
     """Save DiT model checkpoint and training state"""
     os.makedirs(save_dir, exist_ok=True)
@@ -64,9 +65,6 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer=None, scheduler=N
     
     if optimizer is not None:
         training_state['optimizer_state_dict'] = optimizer.state_dict()
-    
-    if scheduler is not None:
-        training_state['scheduler_state_dict'] = scheduler.state_dict()
     
     # Save training state with same naming convention
     training_filename = filename.replace('.safetensors', '_training_state.pt')
@@ -160,13 +158,8 @@ def train_dit(dataset_path: str,
     # Register cleanup function with atexit
     atexit.register(cleanup_memory)
     
-    # Setup optimizer and scheduler
-    optimizer = optim.AdamW(dit_model.parameters(), lr=learning_rate, weight_decay=0.01)
-    
-    # Add learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10
-    )
+    # Setup optimizer with weight decay for regularization
+    optimizer = optim.AdamW(dit_model.parameters(), lr=learning_rate, weight_decay=0.1)
     
     # Create hyperparameters dict for filename
     hyperparams = {
@@ -202,9 +195,6 @@ def train_dit(dataset_path: str,
             
             if 'optimizer_state_dict' in training_state:
                 optimizer.load_state_dict(training_state['optimizer_state_dict'])
-            
-            if 'scheduler_state_dict' in training_state:
-                scheduler.load_state_dict(training_state['scheduler_state_dict'])
             
             print(f"Checkpoint loaded: resuming from epoch {start_epoch}, batch {global_batch_idx}")
             
@@ -283,7 +273,7 @@ def train_dit(dataset_path: str,
                     print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
                     
                     # Save checkpoint
-                    save_model(dit_model, save_dir, epoch + 1, optimizer, scheduler, global_batch_idx, hyperparams)
+                    save_model(dit_model, save_dir, epoch + 1, optimizer, global_batch_idx, hyperparams)
                     
                     # Generate video sample
                     if vae_model is not None:
@@ -345,14 +335,13 @@ def train_dit(dataset_path: str,
             'epoch/number': epoch + 1
         })
         
-        # Learning rate scheduling
-        scheduler.step(avg_epoch_loss)
+        # No LR scheduling - stability from architecture (RMSNorm + QKNorm)
         
         # Reset running loss
         running_loss = 0.0
     
     # Final save
-    save_model(dit_model, save_dir, num_epochs, optimizer, scheduler, global_batch_idx, hyperparams)
+    save_model(dit_model, save_dir, num_epochs, optimizer, global_batch_idx, hyperparams)
     
     print("Training completed!")
     wandb.finish()

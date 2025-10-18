@@ -15,6 +15,22 @@ from einops import rearrange, repeat
 from torchtune.modules import RotaryPositionalEmbeddings
 
 
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization for improved stability"""
+    
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    
+    def forward(self, x: Tensor) -> Tensor:
+        # Calculate RMS
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        # Normalize and scale
+        x_norm = x / rms
+        return self.weight * x_norm
+
+
 class MultiHeadAttentionWithRoPE(nn.Module):
     """Multi-head attention with rotary positional embeddings using torchtune's RoPE"""
     
@@ -36,6 +52,10 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.qkv = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
         self.proj = nn.Linear(embed_dim, embed_dim)
         self.dropout = nn.Dropout(dropout)
+        
+        # QKNorm: Normalize queries and keys for stability
+        self.q_norm = RMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim)
         
         # TorchTune's RoPE implementation
         # RoPE needs to handle the full spatio-temporal sequence: num_frames * n_patches
@@ -89,6 +109,16 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, T, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]
         
+        # Apply QKNorm before RoPE for stability
+        q = rearrange(q, 'b h t d -> (b h t) d')
+        k = rearrange(k, 'b h t d -> (b h t) d')
+        
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+        
+        q = rearrange(q, '(b h t) d -> b h t d', b=B, h=self.num_heads, t=T)
+        k = rearrange(k, '(b h t) d -> b h t d', b=B, h=self.num_heads, t=T)
+        
         # Apply RoPE to queries and keys using TorchTune's implementation
         # TorchTune RoPE expects (B, T, num_heads, head_dim), so we need to rearrange
         q = rearrange(q, 'b h t d -> b t h d')  # (B, T, num_heads, head_dim)
@@ -140,9 +170,9 @@ class DiTBlock(nn.Module):
     
     def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 16):
         super().__init__()
-        self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.norm1 = RMSNorm(embed_dim)
         self.attn = MultiHeadAttentionWithRoPE(embed_dim, num_heads, dropout, max_seq_len, n_patches, num_frames)
-        self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
+        self.norm2 = RMSNorm(embed_dim)
         self.ff = FeedForward(embed_dim, ff_dim, dropout)
         
         # FiLM: Feature-wise Linear Modulation for time conditioning
@@ -243,8 +273,8 @@ class DiffusionTransformer(nn.Module):
         # Output projection: back to latent space (per patch)
         self.output_proj = nn.Linear(embed_dim, latent_dim)
         
-        # Layer norm
-        self.norm = nn.LayerNorm(embed_dim)
+        # Final RMS norm
+        self.norm = RMSNorm(embed_dim)
 
         # Learnable velocity scale
         self.velocity_scale = nn.Parameter(torch.tensor(2.0))
@@ -268,8 +298,8 @@ class DiffusionTransformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.LayerNorm):
-            if module.bias is not None:
+        elif isinstance(module, (nn.LayerNorm, RMSNorm)):
+            if hasattr(module, 'bias') and module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
             if module.weight is not None:
                 torch.nn.init.ones_(module.weight)
@@ -382,39 +412,6 @@ def create_dit(latent_dim: int,
     )
     
     return model
-
-def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_context_length: int):
-    """
-    Flow matching loss for training DiT model
-    
-    Args:
-        model: DiffusionTransformer model
-        batch: Input sequences (batch_size, seq_len, n_patches, latent_dim)
-        
-    Returns:
-        Flow matching loss
-    """
-
-    batch_size, seq_len, n_patches, latent_dim = batch.shape
-    # Sample noise
-    prior = torch.randn_like(batch)
-    
-    # Sample time uniformly from [0, 1] for each batch item
-    t = torch.rand(batch_size, device=batch.device)  # (batch_size,)
-    t_unsqueezed = t.unsqueeze(1)  # (batch_size, 1) for broadcasting
-    w = 4.8
-    video_t = torch.arange(seq_len, device=batch.device).unsqueeze(0) - past_context_length - 1
-    noise_weight = torch.clamp(torch.exp(-(w / (seq_len - past_context_length))*(video_t - t_unsqueezed)), max=1.0).unsqueeze(2).unsqueeze(3)
-    x_t = (1 - noise_weight) * prior + noise_weight * batch
-    # Predict velocity field (pass 1D t to model)
-    v_pred = model(x_t, t)
-    
-    # True velocity is data - noise
-    v_target = batch - prior
-
-    loss = torch.nn.functional.mse_loss(v_pred[:, past_context_length:], v_target[:, past_context_length:])    
-    return loss
-    
 
 def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_context_length: int):
     """
