@@ -69,20 +69,20 @@ class ODEFlowSolver:
                 x = x + v * dt
             return x
 
-        # def rk4_solve(x0, ode_func, steps=50):
-        #     """A more stable RK4 solver."""
-        #     x = x0
-        #     dt = 1.0 / steps
-        #     for i in range(steps):
-        #         t = i * dt
-        #         k1 = ode_func(t, x)
-        #         k2 = ode_func(t + 0.5 * dt, x + 0.5 * dt * k1)
-        #         k3 = ode_func(t + 0.5 * dt, x + 0.5 * dt * k2)
-        #         k4 = ode_func(t + dt, x + dt * k3)
-        #         x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        #     return x
+        def rk4_solve(x0, ode_func, steps=50):
+            """A more stable RK4 solver."""
+            x = x0
+            dt = 1.0 / steps
+            for i in range(steps):
+                t = i * dt
+                k1 = ode_func(t, x)
+                k2 = ode_func(t + 0.5 * dt, x + 0.5 * dt * k1)
+                k3 = ode_func(t + 0.5 * dt, x + 0.5 * dt * k2)
+                k4 = ode_func(t + dt, x + dt * k3)
+                x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+            return x
 
-        final_state = euler_solve_mps(future_frames)
+        final_state = rk4_solve(future_frames, ode_func)
         
         # Get final state and reshape
         # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
