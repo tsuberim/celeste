@@ -41,7 +41,7 @@ class ODEFlowSolver:
 
         # Define ODE function for scipy
         def ode_func(t, x_flat):
-            f_frames = x_flat
+            f_frames = x_flat.reshape(batch_size, seq_len, n_patches, latent_dim)
             batch = torch.cat([gen_frames, f_frames], dim=1)
             t = torch.full((batch_size,), t, device=batch.device)
             velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
@@ -51,28 +51,28 @@ class ODEFlowSolver:
         t_span = (0, 1)
         t_eval = np.array([1.0])  # Only need final result
         # Solve ODE using scipy
-        # solution = solve_ivp(
-        #     fun=ode_func,
-        #     y0=future_frames.flatten().cpu().numpy(),
-        #     t_span=t_span,
-        #     method='DOP853',  # Dormand-Prince 8(5,3)
-        #     t_eval=t_eval,
-        #     rtol=1e-1,
-        #     atol=1e-3,
-        # )
-        def euler_solve_mps(x0, steps=30):
-            x = x0
-            dt = 1.0 / steps
-            for i in range(steps):
-                t = i * dt#, torch.tensor([i * dt], device=x.device)
-                v = ode_func(t, x)
-                x = x + v * dt
-            return x
+        solution = solve_ivp(
+            fun=ode_func,
+            y0=future_frames.flatten().cpu().numpy(),
+            t_span=t_span,
+            method='DOP853',  # Dormand-Prince 8(5,3)
+            t_eval=t_eval,
+            rtol=1e-1,
+            atol=1e-3,
+        )
+        # def euler_solve_mps(x0, steps=30):
+        #     x = x0
+        #     dt = 1.0 / steps
+        #     for i in range(steps):
+        #         t = i * dt#, torch.tensor([i * dt], device=x.device)
+        #         v = ode_func(t, x)
+        #         x = x + v * dt
+        #     return x
 
-        final_state = euler_solve_mps(future_frames)
+        # final_state = euler_solve_mps(future_frames)
         
         # Get final state and reshape
-        # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
+        final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
         f_frames = final_state.reshape(batch_size, future_frames.shape[1], n_patches, latent_dim)
         
         gen_frame = f_frames[:, 0]
@@ -332,6 +332,12 @@ def main():
                        help="VAE size parameter")
     parser.add_argument("--past_context_length", type=int, default=31,
                        help="Past context length")
+    parser.add_argument("--num_heads", type=int, default=16,
+                       help="Number of attention heads")
+    parser.add_argument("--num_layers", type=int, default=12,
+                       help="Number of transformer layers")
+    parser.add_argument("--embed_dim", type=int, default=768,
+                       help="Transformer embedding dimension")
     parser.add_argument("--prompt_video", type=str, default=None,
                        help="Path to video file to use as prompt (optional)")
     parser.add_argument("--prompt_max_frames", type=int, default=None,
@@ -347,6 +353,9 @@ def main():
     dit_model = create_dit(
         latent_dim=args.latent_dim,
         n_patches=args.n_patches,
+        embed_dim=args.embed_dim,
+        num_layers=args.num_layers,
+        num_heads=args.num_heads,
         max_seq_len=args.max_seq_len,
     )
     
