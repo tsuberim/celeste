@@ -18,7 +18,7 @@ from torchtune.modules import RotaryPositionalEmbeddings
 class MultiHeadAttentionWithRoPE(nn.Module):
     """Multi-head attention with rotary positional embeddings using torchtune's RoPE"""
     
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 32):
         super().__init__()
         assert embed_dim % num_heads == 0
         
@@ -27,6 +27,8 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.head_dim = embed_dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.max_seq_len = max_seq_len
+        self.n_patches = n_patches
+        self.num_frames = num_frames
         
         self.qkv = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
         self.proj = nn.Linear(embed_dim, embed_dim)
@@ -38,12 +40,43 @@ class MultiHeadAttentionWithRoPE(nn.Module):
             max_seq_len=max_seq_len,
             base=10000
         )
+        
+        # Pre-compute spatio-temporal causal mask
+        self.register_buffer('spatiotemporal_mask', self._create_spatiotemporal_causal_mask())
+    
+    def _create_spatiotemporal_causal_mask(self) -> Tensor:
+        """
+        Create spatio-temporal causal mask at initialization.
+        - Within a frame: all patches can attend to each other (spatial attention)
+        - Across frames: can only attend to past frames (temporal causality)
+        
+        Returns:
+            Boolean mask of shape (num_frames * n_patches, num_frames * n_patches)
+            True = can attend, False = masked out
+        """
+        total_len = self.num_frames * self.n_patches
+        mask = torch.zeros(total_len, total_len, dtype=torch.bool)
+        
+        for i in range(self.num_frames):
+            for j in range(self.num_frames):
+                # Frame i patches (rows) attending to frame j patches (columns)
+                i_start, i_end = i * self.n_patches, (i + 1) * self.n_patches
+                j_start, j_end = j * self.n_patches, (j + 1) * self.n_patches
+                
+                if j <= i:
+                    # Current and past frames: can attend to all patches
+                    mask[i_start:i_end, j_start:j_end] = True
+                else:
+                    # Future frames: mask out
+                    mask[i_start:i_end, j_start:j_end] = False
+        
+        return mask
     
     def forward(self, x: Tensor, use_causal: bool = False) -> Tensor:
         """
         Args:
-            x: (batch_size, seq_len, embed_dim)
-            use_causal: Whether to use causal masking
+            x: (batch_size, seq_len, embed_dim) where seq_len = num_frames * n_patches
+            use_causal: Whether to use spatio-temporal causal masking
         """
         B, T, C = x.shape
         
@@ -64,10 +97,13 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         q = rearrange(q, 'b t h d -> b h t d')
         k = rearrange(k, 'b t h d -> b h t d')
         
-        # Use PyTorch's optimized scaled_dot_product_attention with built-in causal masking
+        # Use pre-computed spatio-temporal causal mask if needed
+        attn_mask = self.spatiotemporal_mask if use_causal else None
+        
+        # Use PyTorch's optimized scaled_dot_product_attention
         out = F.scaled_dot_product_attention(
             q, k, v,
-            is_causal=use_causal,  # Use PyTorch's built-in causal masking
+            attn_mask=attn_mask,
             dropout_p=self.dropout.p if self.training else 0.0
         )
         
@@ -97,10 +133,10 @@ class FeedForward(nn.Module):
 class DiTBlock(nn.Module):
     """Diffusion Transformer block with RoPE attention, feed-forward, and FiLM conditioning"""
     
-    def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024):
+    def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 32):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
-        self.attn = MultiHeadAttentionWithRoPE(embed_dim, num_heads, dropout, max_seq_len)
+        self.attn = MultiHeadAttentionWithRoPE(embed_dim, num_heads, dropout, max_seq_len, n_patches, num_frames)
         self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
         self.ff = FeedForward(embed_dim, ff_dim, dropout)
         
@@ -182,8 +218,8 @@ class DiffusionTransformer(nn.Module):
         self.embed_dim = embed_dim
         self.max_seq_len = max_seq_len
         
-        # Input projection: flatten patches and project to embed_dim
-        self.input_proj = nn.Linear(n_patches * latent_dim, embed_dim)
+        # Input projection: project each patch to embed_dim
+        self.input_proj = nn.Linear(latent_dim, embed_dim)
         
         # Time embedding layers
         self.time_embed_dim = embed_dim // 4  # Use 1/4 of embed_dim for time
@@ -195,12 +231,12 @@ class DiffusionTransformer(nn.Module):
         
         # Transformer blocks
         self.blocks = nn.ModuleList([
-            DiTBlock(embed_dim, num_heads, ff_dim, dropout, max_seq_len)
+            DiTBlock(embed_dim, num_heads, ff_dim, dropout, max_seq_len, n_patches, max_seq_len)
             for _ in range(num_layers)
         ])
         
-        # Output projection: back to latent space
-        self.output_proj = nn.Linear(embed_dim, n_patches * latent_dim)
+        # Output projection: back to latent space (per patch)
+        self.output_proj = nn.Linear(embed_dim, latent_dim)
         
         # Layer norm
         self.norm = nn.LayerNorm(embed_dim)
@@ -280,27 +316,27 @@ class DiffusionTransformer(nn.Module):
         t_emb = self.get_timestep_embedding(t)  # (batch_size, time_embed_dim)
         t_emb = self.time_mlp(t_emb)  # (batch_size, embed_dim)
         
-        # Flatten patches: (batch_size, seq_len, n_patches * latent_dim)
-        x_flat = x.reshape(batch_size, seq_len, n_patches * latent_dim)
+        # Flatten spatial and temporal dimensions: (batch_size, seq_len * n_patches, latent_dim)
+        x_flat = x.reshape(batch_size, seq_len * n_patches, latent_dim)
         
-        # Project to embedding space
-        x_emb = self.input_proj(x_flat)  # (batch_size, seq_len, embed_dim)
+        # Project each patch to embedding space
+        x_emb = self.input_proj(x_flat)  # (batch_size, seq_len * n_patches, embed_dim)
         
-        # Add time conditioning: broadcast time embedding across sequence
+        # Add time conditioning: broadcast time embedding across all patches
         # This tells the model what timestep t it's at in the flow
-        # x_emb = x_emb + t_emb.unsqueeze(1)  # (batch_size, seq_len, embed_dim)
+        # x_emb = x_emb + t_emb.unsqueeze(1)  # (batch_size, seq_len * n_patches, embed_dim)
         
-        # Apply transformer blocks with causal flag
+        # Apply transformer blocks with spatio-temporal causal masking
         for block in self.blocks:
             x_emb = block(x_emb, t_emb, use_causal_mask)
         
         # Layer norm (let's try to remove this)
         # x_emb = self.norm(x_emb)
         
-        # Project back to latent space for all sequence positions
-        output = self.output_proj(x_emb)  # (batch_size, seq_len, n_patches * latent_dim)
+        # Project back to latent space for all patches
+        output = self.output_proj(x_emb)  # (batch_size, seq_len * n_patches, latent_dim)
         
-        # Reshape to patch format (no residual - we're predicting velocities, not corrections)
+        # Reshape back to (batch_size, seq_len, n_patches, latent_dim)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
         
         # Apply learnable velocity scale

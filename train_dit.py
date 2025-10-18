@@ -238,7 +238,7 @@ def train_dit(dataset_path: str,
                 loss.backward()
                 
                 # Gradient clipping and get grad norm
-                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=5.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=1.0)
                 
                 optimizer.step()
                 
