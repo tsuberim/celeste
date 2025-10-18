@@ -355,7 +355,7 @@ def main():
                        help="Latent dimension per patch")
     parser.add_argument("--n_patches", type=int, default=220,
                        help="Number of patches per frame")
-    parser.add_argument("--embed_dim", type=int, default=1024,
+    parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
     parser.add_argument("--num_layers", type=int, default=16,
                        help="Number of transformer layers")
