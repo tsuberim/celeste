@@ -41,11 +41,11 @@ class ODEFlowSolver:
 
         # Define ODE function for scipy
         def ode_func(t, x_flat):
-            f_frames = x_flat.reshape(batch_size, seq_len, n_patches, latent_dim)
+            f_frames = torch.from_numpy(x_flat).float().to(gen_frames.device).reshape(*future_frames.shape)
             batch = torch.cat([gen_frames, f_frames], dim=1)
             t = torch.full((batch_size,), t, device=batch.device)
             velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
-            return velocity
+            return velocity.flatten().cpu().numpy()
         
 
         t_span = (0, 1)
@@ -57,7 +57,7 @@ class ODEFlowSolver:
             t_span=t_span,
             method='DOP853',  # Dormand-Prince 8(5,3)
             t_eval=t_eval,
-            rtol=1e-1,
+            rtol=1e-2,
             atol=1e-3,
         )
         # def euler_solve_mps(x0, steps=30):
@@ -306,9 +306,6 @@ def save_video(frames: torch.Tensor, output_path: str, fps: int = 24):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate video using DiT model")
-    parser.add_argument("--dit_checkpoint", type=str, 
-                       default="./models/dit_seq32_dim48_embed768_layers12_heads16.safetensors",
-                       help="Path to DiT model checkpoint")
     parser.add_argument("--vae_checkpoint", type=str, 
                        default="./models/vae_size2_latent48.safetensors",
                        help="Path to VAE model checkpoint")
@@ -334,9 +331,9 @@ def main():
                        help="Past context length")
     parser.add_argument("--num_heads", type=int, default=16,
                        help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=12,
+    parser.add_argument("--num_layers", type=int, default=16,
                        help="Number of transformer layers")
-    parser.add_argument("--embed_dim", type=int, default=768,
+    parser.add_argument("--embed_dim", type=int, default=1024,
                        help="Transformer embedding dimension")
     parser.add_argument("--prompt_video", type=str, default=None,
                        help="Path to video file to use as prompt (optional)")
@@ -348,8 +345,10 @@ def main():
     device = get_device()
     print(f"Using device: {device}")
     
+    dit_checkpoint = f"./models/dit_seq{args.max_seq_len}_dim{args.latent_dim}_embed{args.embed_dim}_layers{args.num_layers}_heads{args.num_heads}.safetensors"
+
     # Load DiT model
-    print(f"Loading DiT model from {args.dit_checkpoint}")
+    print(f"Loading DiT model from {dit_checkpoint}")
     dit_model = create_dit(
         latent_dim=args.latent_dim,
         n_patches=args.n_patches,
@@ -361,7 +360,7 @@ def main():
     
     # Load DiT checkpoint (safetensors format)
     from safetensors.torch import load_file
-    dit_state_dict = load_file(args.dit_checkpoint)
+    dit_state_dict = load_file(dit_checkpoint)
     dit_model.load_state_dict(dit_state_dict)
     print("DiT model loaded successfully")
     
