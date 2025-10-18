@@ -96,7 +96,7 @@ class FeedForward(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    """Diffusion Transformer block with RoPE attention and feed-forward"""
+    """Diffusion Transformer block with RoPE attention, feed-forward, and FiLM conditioning"""
     
     def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024):
         super().__init__()
@@ -104,25 +104,46 @@ class DiTBlock(nn.Module):
         self.attn = MultiHeadAttentionWithRoPE(embed_dim, num_heads, dropout, max_seq_len)
         self.norm2 = nn.LayerNorm(embed_dim, eps=1e-6)
         self.ff = FeedForward(embed_dim, ff_dim, dropout)
+        
+        # FiLM: Feature-wise Linear Modulation for time conditioning
+        # Predict scale and shift parameters for each normalization layer
+        self.film_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim * 4)  # 2 * embed_dim for each of 2 norms
+        )
     
     def forward(self, x: Tensor, t_emb: Tensor, attn_mask: Optional[Tensor] = None) -> Tensor:
         """
-        Forward pass (t_emb ignored, kept for compatibility)
+        Forward pass with FiLM time conditioning
         
         Args:
             x: Input tensor (batch_size, seq_len, embed_dim)
-            t_emb: Time embeddings (unused, kept for compatibility)
+            t_emb: Time embeddings (batch_size, embed_dim)
             attn_mask: Optional attention mask
             
         Returns:
             Output tensor (batch_size, seq_len, embed_dim)
         """
-        # Standard transformer block without time conditioning
+        # Get FiLM parameters from time embedding
+        film_params = self.film_mlp(t_emb)  # (batch_size, embed_dim * 4)
+        scale1, shift1, scale2, shift2 = film_params.chunk(4, dim=-1)  # Each: (batch_size, embed_dim)
+        
+        # Reshape for broadcasting: (batch_size, 1, embed_dim)
+        scale1 = scale1.unsqueeze(1)
+        shift1 = shift1.unsqueeze(1)
+        scale2 = scale2.unsqueeze(1)
+        shift2 = shift2.unsqueeze(1)
+        
+        # Attention block with FiLM conditioning
         h1 = self.norm1(x)
+        h1 = h1 * (1 + scale1) + shift1  # FiLM modulation
         h1 = self.attn(h1, attn_mask)
         x = x + h1
         
+        # Feed-forward block with FiLM conditioning
         h2 = self.norm2(x)
+        h2 = h2 * (1 + scale2) + shift2  # FiLM modulation
         h2 = self.ff(h2)
         x = x + h2
         
@@ -184,6 +205,8 @@ class DiffusionTransformer(nn.Module):
         
         # Layer norm
         self.norm = nn.LayerNorm(embed_dim)
+
+        self.velocity_scale = nn.Parameter(torch.tensor(0.5))
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -193,6 +216,7 @@ class DiffusionTransformer(nn.Module):
         torch.nn.init.normal_(self.output_proj.weight, mean=0.0, std=0.02)
         if self.output_proj.bias is not None:
             torch.nn.init.zeros_(self.output_proj.bias)
+            
         
         print(f"DiT initialized with {sum(p.numel() for p in self.parameters()):,} parameters")
     
@@ -281,15 +305,15 @@ class DiffusionTransformer(nn.Module):
         for block in self.blocks:
             x_emb = block(x_emb, t_emb, attn_mask)
         
-        # Layer norm
-        x_emb = self.norm(x_emb)
+        # Layer norm (let's try to remove this)
+        # x_emb = self.norm(x_emb)
         
         # Project back to latent space for all sequence positions
         output = self.output_proj(x_emb)  # (batch_size, seq_len, n_patches * latent_dim)
         
         # Reshape to patch format (no residual - we're predicting velocities, not corrections)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
-        
+        output = output * self.velocity_scale
         return output
     
 
