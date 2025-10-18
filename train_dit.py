@@ -238,11 +238,17 @@ def train_dit(dataset_path: str,
                 optimizer.zero_grad()
                 loss = flow_matching_loss(dit_model, sequences, past_context_length)
                 
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}!")
+                    print(f"Skipping batch...")
+                    continue
+                
                 # Backward pass
                 loss.backward()
                 
                 # Gradient clipping and get grad norm
-                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
                 
                 optimizer.step()
                 
