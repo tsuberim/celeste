@@ -358,9 +358,9 @@ def main():
                        help="Number of patches per frame")
     parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
-    parser.add_argument("--num_layers", type=int, default=16,
+    parser.add_argument("--num_layers", type=int, default=12,
                        help="Number of transformer layers")
-    parser.add_argument("--num_heads", type=int, default=16,
+    parser.add_argument("--num_heads", type=int, default=8,
                        help="Number of attention heads")
     parser.add_argument("--max_seq_len", type=int, default=32,
                        help="Maximum sequence length")

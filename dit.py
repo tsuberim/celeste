@@ -25,6 +25,9 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        
+        # RoPE requires even head_dim
+        assert self.head_dim % 2 == 0, f"head_dim must be even for RoPE, got {self.head_dim} (embed_dim={embed_dim}, num_heads={num_heads})"
         self.scale = self.head_dim ** -0.5
         self.max_seq_len = max_seq_len
         self.n_patches = n_patches
