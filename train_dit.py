@@ -262,6 +262,7 @@ def train_dit(dataset_path: str,
                     'train/avg_loss': running_loss / (batch_idx + 1),
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
                     'train/grad_norm': grad_norm.item(),
+                    'train/velocity_scale': dit_model.velocity_scale.item(),
                     'train/epoch': epoch,
                     'train/global_step': global_batch_idx
                 })

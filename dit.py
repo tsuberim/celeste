@@ -206,7 +206,7 @@ class DiffusionTransformer(nn.Module):
         # Layer norm
         self.norm = nn.LayerNorm(embed_dim)
 
-        self.velocity_scale = nn.Parameter(torch.tensor(0.5))
+        self.velocity_scale = nn.Parameter(torch.tensor(2.0))
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -306,7 +306,7 @@ class DiffusionTransformer(nn.Module):
             x_emb = block(x_emb, t_emb, attn_mask)
         
         # Layer norm (let's try to remove this)
-        # x_emb = self.norm(x_emb)
+        x_emb = self.norm(x_emb)
         
         # Project back to latent space for all sequence positions
         output = self.output_proj(x_emb)  # (batch_size, seq_len, n_patches * latent_dim)
