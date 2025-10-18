@@ -87,7 +87,7 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
                                  latent_dim: int = 48,
                                  max_seq_len: int = 32,
                                  device: torch.device = None,
-                                 past_context_length: int = 16,
+                                 past_context_length: int = 31,
                                  prompt_video_path: str = None,
                                  prompt_max_frames: int = None,
                                  batch_size: int = 1,
@@ -330,7 +330,7 @@ def main():
                        help="Number of patches per frame")
     parser.add_argument("--vae_size", type=int, default=2,
                        help="VAE size parameter")
-    parser.add_argument("--past_context_length", type=int, default=16,
+    parser.add_argument("--past_context_length", type=int, default=31,
                        help="Past context length")
     parser.add_argument("--prompt_video", type=str, default=None,
                        help="Path to video file to use as prompt (optional)")
@@ -423,7 +423,7 @@ def main():
 
 
 def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 32, 
-                         past_context_length: int = 16, max_seq_len: int = 32, 
+                         past_context_length: int = 31, max_seq_len: int = 32, 
                          n_patches: int = 220, latent_dim: int = 48, fps: int = 12, device=None,
                          batch_size: int = 4, prompt_sequences: torch.Tensor = None,
                          return_arrays: bool = False):
