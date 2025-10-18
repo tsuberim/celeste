@@ -41,38 +41,38 @@ class ODEFlowSolver:
 
         # Define ODE function for scipy
         def ode_func(t, x_flat):
-            f_frames = torch.from_numpy(x_flat).float().to(gen_frames.device).reshape(*future_frames.shape)
+            f_frames = x_flat
             batch = torch.cat([gen_frames, f_frames], dim=1)
             t = torch.full((batch_size,), t, device=batch.device)
             velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
-            return velocity.flatten().cpu().numpy()
+            return velocity
         
 
         t_span = (0, 1)
         t_eval = np.array([1.0])  # Only need final result
         # Solve ODE using scipy
-        solution = solve_ivp(
-            fun=ode_func,
-            y0=future_frames.flatten().cpu().numpy(),
-            t_span=t_span,
-            method='DOP853',  # Dormand-Prince 8(5,3)
-            t_eval=t_eval,
-            rtol=1e-1,
-            atol=1e-2,
-        )
-        # def euler_solve_mps(x0, steps=30):
-        #     x = x0
-        #     dt = 1.0 / steps
-        #     for i in range(steps):
-        #         t = i * dt#, torch.tensor([i * dt], device=x.device)
-        #         v = ode_func(t, x)
-        #         x = x + v * dt
-        #     return x
+        # solution = solve_ivp(
+        #     fun=ode_func,
+        #     y0=future_frames.flatten().cpu().numpy(),
+        #     t_span=t_span,
+        #     method='DOP853',  # Dormand-Prince 8(5,3)
+        #     t_eval=t_eval,
+        #     rtol=1e-1,
+        #     atol=1e-2,
+        # )
+        def euler_solve_mps(x0, steps=30):
+            x = x0
+            dt = 1.0 / steps
+            for i in range(steps):
+                t = i * dt#, torch.tensor([i * dt], device=x.device)
+                v = ode_func(t, x)
+                x = x + v * dt
+            return x
 
-        # final_state = euler_solve_mps(future_frames)
+        final_state = euler_solve_mps(future_frames)
         
         # Get final state and reshape
-        final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
+        # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
         f_frames = final_state.reshape(batch_size, future_frames.shape[1], n_patches, latent_dim)
         
         gen_frame = f_frames[:, 0]
