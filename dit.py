@@ -244,7 +244,7 @@ class DiffusionTransformer(nn.Module):
             
         return emb
     
-    def forward(self, x: Tensor, t: Tensor = None, use_causal_mask: bool = True) -> Tensor:
+    def forward(self, x: Tensor, t: Tensor = None, use_causal_mask: bool = False) -> Tensor:
         """
         Forward pass for sequence prediction
         
@@ -351,7 +351,7 @@ def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_co
     noise_weight = torch.clamp(torch.exp(-(w / (seq_len - past_context_length))*(video_t - t_unsqueezed)), max=1.0).unsqueeze(2).unsqueeze(3)
     x_t = (1 - noise_weight) * prior + noise_weight * batch
     # Predict velocity field (pass 1D t to model)
-    v_pred = model(x_t, t, use_causal_mask=True)
+    v_pred = model(x_t, t)
     
     # True velocity is data - noise
     v_target = batch - prior

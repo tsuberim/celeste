@@ -44,7 +44,7 @@ class ODEFlowSolver:
             f_frames = x_flat
             batch = torch.cat([gen_frames, f_frames], dim=1)
             t = torch.full((batch_size,), t, device=batch.device)
-            velocity = self.dit_model(batch, t, use_causal_mask=True)[:, gen_frames.shape[1]:]
+            velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
             return velocity
         
 
