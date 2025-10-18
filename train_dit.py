@@ -76,13 +76,13 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer=None, scheduler=N
 
 
 def train_dit(dataset_path: str,
-              sequence_length: int = 32,
+              sequence_length: int = 16,
               latent_dim: int = 48,
               n_patches: int = 220,
               embed_dim: int = 512,
               num_layers: int = 12,
               num_heads: int = 8,
-              max_seq_len: int = 32,
+              max_seq_len: int = 16,
               batch_size: int = 4,
               num_epochs: int = 1000000,
               learning_rate: float = 1e-3,
@@ -305,7 +305,7 @@ def train_dit(dataset_path: str,
                     dit_model=dit_model,
                     vae_model=vae_model,
                     video_path=None,  # Not used when return_arrays=True
-                    num_frames=32,
+                    num_frames=16,
                     past_context_length=past_context_length,
                     max_seq_len=max_seq_len,
                     n_patches=n_patches,
@@ -350,7 +350,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train DiT model on encoded video dataset")
     parser.add_argument("dataset_path", type=str, 
                        help="Path to encoded dataset (H5 file or directory)")
-    parser.add_argument("--sequence_length", type=int, default=32,
+    parser.add_argument("--sequence_length", type=int, default=16,
                        help="Sequence length for training")
     parser.add_argument("--latent_dim", type=int, default=48,
                        help="Latent dimension per patch")
@@ -362,7 +362,7 @@ def main():
                        help="Number of transformer layers")
     parser.add_argument("--num_heads", type=int, default=8,
                        help="Number of attention heads")
-    parser.add_argument("--max_seq_len", type=int, default=32,
+    parser.add_argument("--max_seq_len", type=int, default=16,
                        help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=64,
                        help="Batch size for training")

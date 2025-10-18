@@ -18,7 +18,7 @@ from torchtune.modules import RotaryPositionalEmbeddings
 class MultiHeadAttentionWithRoPE(nn.Module):
     """Multi-head attention with rotary positional embeddings using torchtune's RoPE"""
     
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 32):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 16):
         super().__init__()
         assert embed_dim % num_heads == 0
         
@@ -138,7 +138,7 @@ class FeedForward(nn.Module):
 class DiTBlock(nn.Module):
     """Diffusion Transformer block with RoPE attention, feed-forward, and FiLM conditioning"""
     
-    def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 32):
+    def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 16):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim, eps=1e-6)
         self.attn = MultiHeadAttentionWithRoPE(embed_dim, num_heads, dropout, max_seq_len, n_patches, num_frames)
@@ -203,7 +203,7 @@ class DiffusionTransformer(nn.Module):
                  num_layers: int = 12,
                  num_heads: int = 8,
                  ff_dim: int = 2048,
-                 max_seq_len: int = 32,
+                 max_seq_len: int = 16,
                  dropout: float = 0.1):
         """
         Args:
@@ -355,7 +355,7 @@ def create_dit(latent_dim: int,
                embed_dim: int = 768,
                num_layers: int = 12,
                num_heads: int = 8,
-               max_seq_len: int = 32) -> DiffusionTransformer:
+               max_seq_len: int = 16) -> DiffusionTransformer:
     """
     Create a Diffusion Transformer model
     

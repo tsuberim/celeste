@@ -98,7 +98,7 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
                                  max_frames: int,
                                  n_patches: int = 220,
                                  latent_dim: int = 48,
-                                 max_seq_len: int = 32,
+                                 max_seq_len: int = 16,
                                  device: torch.device = None,
                                  past_context_length: int = 31,
                                  prompt_video_path: str = None,
@@ -322,9 +322,9 @@ def main():
     parser.add_argument("--vae_checkpoint", type=str, 
                        default="./models/vae_size2_latent48.safetensors",
                        help="Path to VAE model checkpoint")
-    parser.add_argument("--max_frames", type=int, default=32,
+    parser.add_argument("--max_frames", type=int, default=16,
                        help="Number of frames to generate")
-    parser.add_argument("--max_seq_len", type=int, default=32,
+    parser.add_argument("--max_seq_len", type=int, default=16,
                        help="Maximum context length for DiT")
     parser.add_argument("--output", type=str, default="generated_video.mp4",
                        help="Output video path")
@@ -443,8 +443,8 @@ def main():
     print(f"Generation complete! {B} video(s) saved.")
 
 
-def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 32, 
-                         past_context_length: int = 31, max_seq_len: int = 32, 
+def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 16, 
+                         past_context_length: int = 31, max_seq_len: int = 16, 
                          n_patches: int = 220, latent_dim: int = 48, fps: int = 12, device=None,
                          batch_size: int = 4, prompt_sequences: torch.Tensor = None,
                          return_arrays: bool = False):
