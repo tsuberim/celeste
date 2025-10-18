@@ -84,7 +84,7 @@ def train_dit(dataset_path: str,
               num_heads: int = 8,
               max_seq_len: int = 32,
               batch_size: int = 4,
-              num_epochs: int = 100,
+              num_epochs: int = 1000000,
               learning_rate: float = 1e-3,
               save_dir: str = "./models",
               max_frames: int = None,
@@ -365,7 +365,7 @@ def main():
                        help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=64,
                        help="Batch size for training")
-    parser.add_argument("--num_epochs", type=int, default=100,
+    parser.add_argument("--num_epochs", type=int, default=1000000,
                        help="Number of training epochs")
     parser.add_argument("--learning_rate", type=float, default=4e-4,
                        help="Learning rate")
