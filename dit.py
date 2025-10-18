@@ -35,9 +35,10 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
         # TorchTune's RoPE implementation
+        # RoPE needs to handle the full spatio-temporal sequence: num_frames * n_patches
         self.rope = RotaryPositionalEmbeddings(
             dim=self.head_dim,
-            max_seq_len=max_seq_len,
+            max_seq_len=num_frames * n_patches,
             base=10000
         )
         
