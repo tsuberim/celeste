@@ -384,7 +384,7 @@ def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_co
     return loss
     
 
-def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor):
+def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_context_length: int):
     """
     Vanilla flow matching loss for training DiT model, without special handling of context frames
     
