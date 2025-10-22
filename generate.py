@@ -82,7 +82,7 @@ class ODEFlowSolver:
                 x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
             return x
 
-        final_state = euler_solve_mps(future_frames, steps=15)
+        final_state = euler_solve_mps(future_frames, steps=30)
         
         # Get final state and reshape
         # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)

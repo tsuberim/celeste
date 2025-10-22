@@ -291,7 +291,7 @@ def train_dit(dataset_path: str,
     best_loss = float('inf')
     
     # Time-based checkpoint and video generation (every 15 minutes)
-    checkpoint_interval_seconds = 30 * 60  # 15 minutes
+    checkpoint_interval_seconds = 15 * 60  # 15 minutes
     last_checkpoint_time = time.time() - checkpoint_interval_seconds  # Force initial checkpoint
     
     for epoch in range(start_epoch, num_epochs):
