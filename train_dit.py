@@ -74,6 +74,54 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer=None,
     print(f"Checkpoint saved: model to {model_save_path}, training state to {training_save_path}")
 
 
+def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length, 
+                            max_seq_len, n_patches, latent_dim, device, 
+                            log_prefix="video", step_key="train/global_step", step_value=0):
+    """Generate and log video samples to wandb"""
+    try:
+        print("Generating video sample...")
+        
+        # Sample 4 random prompt sequences from the dataset
+        prompt_batch_size = 4
+        sampled_prompts = []
+        for _ in range(prompt_batch_size):
+            idx = torch.randint(0, len(dataset), (1,)).item()
+            prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
+            # Take first past_context_length frames as prompt
+            sampled_prompts.append(prompt_seq[:past_context_length])
+        
+        # Stack prompts: (batch_size, past_context_length, n_patches, latent_dim)
+        prompt_sequences = torch.stack(sampled_prompts, dim=0)
+        
+        # Generate videos and get as numpy array directly (batch, frames, C, H, W)
+        video_array = generate_and_save_video(
+            dit_model=dit_model,
+            vae_model=vae_model,
+            video_path=None,  # Not used when return_arrays=True
+            num_frames=16,
+            past_context_length=past_context_length,
+            max_seq_len=max_seq_len,
+            n_patches=n_patches,
+            latent_dim=latent_dim,
+            fps=12,
+            device=device,
+            batch_size=prompt_batch_size,
+            prompt_sequences=prompt_sequences,
+            return_arrays=True
+        )
+        
+        if video_array is not None:
+            # Log each video separately to wandb
+            for i in range(video_array.shape[0]):
+                wandb.log({
+                    f'{log_prefix}_{i}': wandb.Video(video_array[i], fps=12, format="mp4"),
+                    step_key: step_value
+                })
+            print(f"Logged {video_array.shape[0]} video samples to wandb")
+    except Exception as e:
+        print(f"Failed to generate video sample: {e}")
+
+
 def train_dit(dataset_path: str,
               sequence_length: int = 16,
               latent_dim: int = 48,
@@ -277,49 +325,13 @@ def train_dit(dataset_path: str,
                     
                     # Generate video sample
                     if vae_model is not None:
-                        try:
-                            print("Generating video sample...")
-                            
-                            # Sample 4 random prompt sequences from the dataset
-                            prompt_batch_size = 4
-                            sampled_prompts = []
-                            for _ in range(prompt_batch_size):
-                                idx = torch.randint(0, len(dataset), (1,)).item()
-                                prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
-                                # Take first past_context_length frames as prompt
-                                sampled_prompts.append(prompt_seq[:past_context_length])
-                            
-                            # Stack prompts: (batch_size, past_context_length, n_patches, latent_dim)
-                            prompt_sequences = torch.stack(sampled_prompts, dim=0)
-                            print(f"Sampled prompt sequences: {prompt_sequences.shape}")
-                            
-                            # Generate videos and get as numpy array directly (batch, frames, C, H, W)
-                            video_array = generate_and_save_video(
-                                dit_model=dit_model,
-                                vae_model=vae_model,
-                                video_path=None,  # Not used when return_arrays=True
-                                num_frames=16,
-                                past_context_length=past_context_length,
-                                max_seq_len=max_seq_len,
-                                n_patches=n_patches,
-                                latent_dim=latent_dim,
-                                fps=12,
-                                device=device,
-                                batch_size=prompt_batch_size,
-                                prompt_sequences=prompt_sequences,
-                                return_arrays=True
-                            )
-                            
-                            if video_array is not None:
-                                # Log each video separately to wandb
-                                for i in range(video_array.shape[0]):
-                                    wandb.log({
-                                        f'generated_video_{i}': wandb.Video(video_array[i], fps=12, format="mp4"),
-                                        'train/global_step': global_batch_idx
-                                    })
-                                print(f"Logged {video_array.shape[0]} video samples to wandb")
-                        except Exception as e:
-                            print(f"Failed to generate video sample: {e}")
+                        generate_and_log_videos(
+                            dit_model, vae_model, dataset, past_context_length,
+                            max_seq_len, n_patches, latent_dim, device,
+                            log_prefix="generated_video",
+                            step_key="train/global_step",
+                            step_value=global_batch_idx
+                        )
                     
                     last_checkpoint_time = current_time
         
@@ -334,6 +346,20 @@ def train_dit(dataset_path: str,
             'epoch/loss': avg_epoch_loss,
             'epoch/number': epoch + 1
         })
+        
+        # Save model checkpoint after each epoch
+        print(f"\nSaving checkpoint after epoch {epoch+1}...")
+        save_model(dit_model, save_dir, epoch + 1, optimizer, global_batch_idx, hyperparams)
+        
+        # Generate and log video after each epoch
+        if vae_model is not None:
+            generate_and_log_videos(
+                dit_model, vae_model, dataset, past_context_length,
+                max_seq_len, n_patches, latent_dim, device,
+                log_prefix="epoch_video",
+                step_key="epoch/number",
+                step_value=epoch + 1
+            )
         
         # No LR scheduling - stability from architecture (RMSNorm + QKNorm)
         

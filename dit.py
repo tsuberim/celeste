@@ -32,7 +32,7 @@ class RMSNorm(nn.Module):
 
 
 class MultiHeadAttentionWithRoPE(nn.Module):
-    """Multi-head attention with rotary positional embeddings using torchtune's RoPE"""
+    """Multi-head spatio-temporal attention with rotary positional embeddings using torchtune's RoPE"""
     
     def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 16):
         super().__init__()
@@ -49,103 +49,131 @@ class MultiHeadAttentionWithRoPE(nn.Module):
         self.n_patches = n_patches
         self.num_frames = num_frames
         
-        self.qkv = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
-        self.proj = nn.Linear(embed_dim, embed_dim)
+        # Spatial attention (within frames)
+        self.spatial_qkv = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
+        self.spatial_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Temporal attention (across frames)
+        self.temporal_qkv = nn.Linear(embed_dim, 3 * embed_dim, bias=False)
+        self.temporal_proj = nn.Linear(embed_dim, embed_dim)
+        
         self.dropout = nn.Dropout(dropout)
         
         # QKNorm: Normalize queries and keys for stability
-        self.q_norm = RMSNorm(self.head_dim)
-        self.k_norm = RMSNorm(self.head_dim)
+        self.spatial_q_norm = RMSNorm(self.head_dim)
+        self.spatial_k_norm = RMSNorm(self.head_dim)
+        self.temporal_q_norm = RMSNorm(self.head_dim)
+        self.temporal_k_norm = RMSNorm(self.head_dim)
         
-        # TorchTune's RoPE implementation
-        # RoPE needs to handle the full spatio-temporal sequence: num_frames * n_patches
-        self.rope = RotaryPositionalEmbeddings(
+        # RoPE for spatial dimension (patches)
+        self.spatial_rope = RotaryPositionalEmbeddings(
             dim=self.head_dim,
-            max_seq_len=num_frames * n_patches,
+            max_seq_len=n_patches,
             base=10000
         )
         
-        # Pre-compute spatio-temporal causal mask
-        self.register_buffer('spatiotemporal_mask', self._create_spatiotemporal_causal_mask())
-    
-    def _create_spatiotemporal_causal_mask(self) -> Tensor:
-        """
-        Create spatio-temporal causal mask at initialization.
-        - Within a frame: all patches can attend to each other (spatial attention)
-        - Across frames: can only attend to past frames (temporal causality)
-        
-        Returns:
-            Boolean mask of shape (num_frames * n_patches, num_frames * n_patches)
-            True = can attend, False = masked out
-        """
-        total_len = self.num_frames * self.n_patches
-        mask = torch.zeros(total_len, total_len, dtype=torch.bool)
-        
-        for i in range(self.num_frames):
-            for j in range(self.num_frames):
-                # Frame i patches (rows) attending to frame j patches (columns)
-                i_start, i_end = i * self.n_patches, (i + 1) * self.n_patches
-                j_start, j_end = j * self.n_patches, (j + 1) * self.n_patches
-                
-                if j <= i:
-                    # Current and past frames: can attend to all patches
-                    mask[i_start:i_end, j_start:j_end] = True
-                else:
-                    # Future frames: mask out
-                    mask[i_start:i_end, j_start:j_end] = False
-        
-        return mask
+        # RoPE for temporal dimension (frames)
+        self.temporal_rope = RotaryPositionalEmbeddings(
+            dim=self.head_dim,
+            max_seq_len=num_frames,
+            base=10000
+        )
     
     def forward(self, x: Tensor, use_causal: bool = False) -> Tensor:
         """
+        Spatio-temporal attention: spatial attention per frame, then temporal attention across frames
+        
         Args:
             x: (batch_size, seq_len, embed_dim) where seq_len = num_frames * n_patches
-            use_causal: Whether to use spatio-temporal causal masking
+            use_causal: Whether to use temporal causal masking
         """
         B, T, C = x.shape
+        assert T % self.n_patches == 0, f"seq_len must be divisible by n_patches={self.n_patches}, got {T}"
         
-        # Compute Q, K, V
-        qkv = self.qkv(x).reshape(B, T, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, T, head_dim)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        # Infer actual number of frames from input
+        num_frames = T // self.n_patches
         
-        # Apply QKNorm before RoPE for stability
-        q = rearrange(q, 'b h t d -> (b h t) d')
-        k = rearrange(k, 'b h t d -> (b h t) d')
+        # Reshape to (B, num_frames, n_patches, C) for spatial attention
+        x = rearrange(x, 'b (f p) c -> b f p c', f=num_frames, p=self.n_patches)
         
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        # 1. SPATIAL ATTENTION (within each frame, across patches)
+        # Reshape to (B*num_frames, n_patches, C)
+        x_spatial = rearrange(x, 'b f p c -> (b f) p c')
         
-        q = rearrange(q, '(b h t) d -> b h t d', b=B, h=self.num_heads, t=T)
-        k = rearrange(k, '(b h t) d -> b h t d', b=B, h=self.num_heads, t=T)
+        # Compute Q, K, V for spatial attention
+        qkv_spatial = self.spatial_qkv(x_spatial).reshape(B * num_frames, self.n_patches, 3, self.num_heads, self.head_dim)
+        qkv_spatial = qkv_spatial.permute(2, 0, 3, 1, 4)  # (3, B*F, num_heads, P, head_dim)
+        q_s, k_s, v_s = qkv_spatial[0], qkv_spatial[1], qkv_spatial[2]
         
-        # Apply RoPE to queries and keys using TorchTune's implementation
-        # TorchTune RoPE expects (B, T, num_heads, head_dim), so we need to rearrange
-        q = rearrange(q, 'b h t d -> b t h d')  # (B, T, num_heads, head_dim)
-        k = rearrange(k, 'b h t d -> b t h d')  # (B, T, num_heads, head_dim)
+        # Apply QKNorm
+        q_s = rearrange(q_s, 'bf h p d -> (bf h p) d')
+        k_s = rearrange(k_s, 'bf h p d -> (bf h p) d')
+        q_s = self.spatial_q_norm(q_s)
+        k_s = self.spatial_k_norm(k_s)
+        q_s = rearrange(q_s, '(bf h p) d -> bf h p d', bf=B*num_frames, h=self.num_heads, p=self.n_patches)
+        k_s = rearrange(k_s, '(bf h p) d -> bf h p d', bf=B*num_frames, h=self.num_heads, p=self.n_patches)
         
-        q = self.rope(q)
-        k = self.rope(k)
+        # Apply spatial RoPE
+        q_s = rearrange(q_s, 'bf h p d -> bf p h d')
+        k_s = rearrange(k_s, 'bf h p d -> bf p h d')
+        q_s = self.spatial_rope(q_s)
+        k_s = self.spatial_rope(k_s)
+        q_s = rearrange(q_s, 'bf p h d -> bf h p d')
+        k_s = rearrange(k_s, 'bf p h d -> bf h p d')
         
-        # Rearrange back to (B, num_heads, T, head_dim) for scaled_dot_product_attention
-        q = rearrange(q, 'b t h d -> b h t d')
-        k = rearrange(k, 'b t h d -> b h t d')
-        
-        # Use pre-computed spatio-temporal causal mask if needed
-        attn_mask = self.spatiotemporal_mask if use_causal else None
-        
-        # Use PyTorch's optimized scaled_dot_product_attention
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            enable_gqa=True
+        # Spatial attention (no causal mask - all patches in a frame attend to each other)
+        out_spatial = F.scaled_dot_product_attention(
+            q_s, k_s, v_s,
+            dropout_p=self.dropout.p if self.training else 0.0
         )
         
-        # Reshape output
-        out = out.transpose(1, 2).reshape(B, T, C)  # (B, T, embed_dim)
+        # Project and reshape back
+        out_spatial = out_spatial.transpose(1, 2).reshape(B * num_frames, self.n_patches, C)
+        out_spatial = self.spatial_proj(out_spatial)
         
-        return self.proj(out)
+        # Reshape to (B, num_frames, n_patches, C)
+        x = rearrange(out_spatial, '(b f) p c -> b f p c', b=B, f=num_frames)
+        
+        # 2. TEMPORAL ATTENTION (across frames, for each patch)
+        # Reshape to (B*n_patches, num_frames, C)
+        x_temporal = rearrange(x, 'b f p c -> (b p) f c')
+        
+        # Compute Q, K, V for temporal attention
+        qkv_temporal = self.temporal_qkv(x_temporal).reshape(B * self.n_patches, num_frames, 3, self.num_heads, self.head_dim)
+        qkv_temporal = qkv_temporal.permute(2, 0, 3, 1, 4)  # (3, B*P, num_heads, F, head_dim)
+        q_t, k_t, v_t = qkv_temporal[0], qkv_temporal[1], qkv_temporal[2]
+        
+        # Apply QKNorm
+        q_t = rearrange(q_t, 'bp h f d -> (bp h f) d')
+        k_t = rearrange(k_t, 'bp h f d -> (bp h f) d')
+        q_t = self.temporal_q_norm(q_t)
+        k_t = self.temporal_k_norm(k_t)
+        q_t = rearrange(q_t, '(bp h f) d -> bp h f d', bp=B*self.n_patches, h=self.num_heads, f=num_frames)
+        k_t = rearrange(k_t, '(bp h f) d -> bp h f d', bp=B*self.n_patches, h=self.num_heads, f=num_frames)
+        
+        # Apply temporal RoPE
+        q_t = rearrange(q_t, 'bp h f d -> bp f h d')
+        k_t = rearrange(k_t, 'bp h f d -> bp f h d')
+        q_t = self.temporal_rope(q_t)
+        k_t = self.temporal_rope(k_t)
+        q_t = rearrange(q_t, 'bp f h d -> bp h f d')
+        k_t = rearrange(k_t, 'bp f h d -> bp h f d')
+        
+        # Temporal attention with optional causal mask
+        out_temporal = F.scaled_dot_product_attention(
+            q_t, k_t, v_t,
+            is_causal=use_causal,
+            dropout_p=self.dropout.p if self.training else 0.0
+        )
+        
+        # Project and reshape back
+        out_temporal = out_temporal.transpose(1, 2).reshape(B * self.n_patches, num_frames, C)
+        out_temporal = self.temporal_proj(out_temporal)
+        
+        # Reshape back to (B, num_frames * n_patches, C)
+        out = rearrange(out_temporal, '(b p) f c -> b (f p) c', b=B, p=self.n_patches)
+        
+        return out
 
 
 class FeedForward(nn.Module):
@@ -333,13 +361,13 @@ class DiffusionTransformer(nn.Module):
             
         return emb
     
-    def forward(self, x: Tensor, t: Tensor = None, use_causal_mask: bool = True) -> Tensor:
+    def forward(self, x: Tensor, t: Tensor, use_causal_mask: bool = True) -> Tensor:
         """
         Forward pass for sequence prediction
         
         Args:
             x: Input sequence (batch_size, seq_len, n_patches, latent_dim)
-            t: Time parameter (batch_size,) for flow matching. If None, defaults to zeros.
+            t: Time parameter (batch_size,) for flow matching
             use_causal_mask: Whether to use causal masking for autoregressive prediction
             
         Returns:
@@ -477,10 +505,6 @@ def test_dit():
     output = dit(x, t)
     print(f"Output shape: {output.shape}")
     print(f"Expected output shape: ({batch_size}, {seq_len}, {n_patches}, {latent_dim})")
-    
-    # Test without time parameter (should default to zeros)
-    output_no_t = dit(x)
-    print(f"Output shape (no time): {output_no_t.shape}")
     
     # Test flow matching loss
     print("\nTesting flow matching loss...")
