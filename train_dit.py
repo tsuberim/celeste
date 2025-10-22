@@ -383,11 +383,11 @@ def main():
                        help="Latent dimension per patch")
     parser.add_argument("--n_patches", type=int, default=220,
                        help="Number of patches per frame")
-    parser.add_argument("--embed_dim", type=int, default=512,
+    parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
     parser.add_argument("--num_layers", type=int, default=12,
                        help="Number of transformer layers")
-    parser.add_argument("--num_heads", type=int, default=8,
+    parser.add_argument("--num_heads", type=int, default=16,
                        help="Number of attention heads")
     parser.add_argument("--max_seq_len", type=int, default=16,
                        help="Maximum sequence length")
