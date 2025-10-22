@@ -135,7 +135,8 @@ def train_dit(dataset_path: str,
               learning_rate: float = 1e-3,
               save_dir: str = "./models",
               max_frames: int = None,
-              past_context_length: int = 15):
+              past_context_length: int = 15,
+              gradient_accumulation_steps: int = 4):
     """Train DiT on encoded video dataset"""
     
     # Initialize wandb
@@ -155,6 +156,8 @@ def train_dit(dataset_path: str,
             "learning_rate": learning_rate,
             "max_frames": max_frames,
             "past_context_length": past_context_length,
+            "gradient_accumulation_steps": gradient_accumulation_steps,
+            "effective_batch_size": batch_size * gradient_accumulation_steps,
         }
     )
     
@@ -209,6 +212,9 @@ def train_dit(dataset_path: str,
     # Setup optimizer with weight decay for regularization
     optimizer = optim.AdamW(dit_model.parameters(), lr=learning_rate, weight_decay=0.1)
     
+    # Setup mixed precision training
+    scaler = torch.amp.GradScaler("cuda")
+    
     # Create hyperparameters dict for filename
     hyperparams = {
         'sequence_length': sequence_length,
@@ -255,6 +261,9 @@ def train_dit(dataset_path: str,
     print(f"Starting DiT training from epoch {start_epoch}")
     print(f"Dataset size: {len(dataset)} sequences")
     print(f"Batches per epoch: {len(dataloader)}")
+    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
+    print(f"Mixed precision training: enabled")
     
     # Training loop
     dit_model.train()
@@ -267,14 +276,15 @@ def train_dit(dataset_path: str,
     
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
+        optimizer.zero_grad()
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for batch_idx, batch_data in enumerate(pbar):
                 sequences = batch_data.to(device)
                 
-                # Forward pass and compute loss
-                optimizer.zero_grad()
-                loss = flow_matching_loss(dit_model, sequences, past_context_length)
+                # Forward pass with mixed precision
+                with torch.amp.autocast("cuda"):
+                    loss = flow_matching_loss(dit_model, sequences, past_context_length)
                 
                 # Check for NaN loss
                 if torch.isnan(loss):
@@ -282,34 +292,49 @@ def train_dit(dataset_path: str,
                     print(f"Skipping batch...")
                     continue
                 
-                # Backward pass
-                loss.backward()
+                # Scale loss by accumulation steps
+                loss = loss / gradient_accumulation_steps
                 
-                # Gradient clipping and get grad norm
-                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
+                # Backward pass with gradient scaling
+                scaler.scale(loss).backward()
                 
-                optimizer.step()
+                # Update metrics (unscaled loss for logging)
+                running_loss += loss.item() * gradient_accumulation_steps
+                epoch_loss += loss.item() * gradient_accumulation_steps
                 
-                # Update metrics
-                running_loss += loss.item()
-                epoch_loss += loss.item()
-                
-                global_batch_idx += 1
+                # Only step optimizer every gradient_accumulation_steps
+                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                    # Unscale gradients for clipping
+                    scaler.unscale_(optimizer)
+                    
+                    # Gradient clipping and get grad norm
+                    grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
+                    
+                    # Step optimizer with scaler
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    
+                    global_batch_idx += 1
+                else:
+                    grad_norm = 0.0
                 
                 # Update progress bar
                 pbar.set_postfix({
-                    'loss': f"{loss.item():.4f}",
+                    'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
                     'avg_loss': f"{running_loss / (batch_idx + 1):.4f}",
                     'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
-                    'grad_norm': f"{grad_norm:.3f}"
+                    'grad_norm': f"{grad_norm:.3f}",
+                    'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
                 })
                 
                 # Log to wandb every batch
                 wandb.log({
-                    'train/loss': loss.item(),
+                    'train/loss': loss.item() * gradient_accumulation_steps,
                     'train/avg_loss': running_loss / (batch_idx + 1),
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
-                    'train/grad_norm': grad_norm.item(),
+                    'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
+                    'train/grad_scaler_scale': scaler.get_scale(),
                     'train/velocity_scale': dit_model.velocity_scale.item(),
                     'train/epoch': epoch,
                     'train/global_step': global_batch_idx
@@ -403,6 +428,8 @@ def main():
                        help="Maximum number of frames to load from dataset (None for all)")
     parser.add_argument("--past_context_length", type=int, default=15,
                        help="Past context length")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
+                       help="Number of gradient accumulation steps")
     args = parser.parse_args()
     
     if not os.path.exists(args.dataset_path):
@@ -423,7 +450,8 @@ def main():
         learning_rate=args.learning_rate,
         save_dir=args.save_dir,
         max_frames=args.max_frames,
-        past_context_length=args.past_context_length
+        past_context_length=args.past_context_length,
+        gradient_accumulation_steps=args.gradient_accumulation_steps
     )
 
 
