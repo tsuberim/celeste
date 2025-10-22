@@ -81,45 +81,61 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
     try:
         print("Generating video sample...")
         
-        # Sample 4 random prompt sequences from the dataset
-        prompt_batch_size = 4
-        sampled_prompts = []
-        for _ in range(prompt_batch_size):
-            idx = torch.randint(0, len(dataset), (1,)).item()
-            prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
-            # Take first past_context_length frames as prompt
-            sampled_prompts.append(prompt_seq[:past_context_length])
+        # Set models to eval mode for generation
+        dit_model.eval()
+        if vae_model is not None:
+            vae_model.eval()
         
-        # Stack prompts: (batch_size, past_context_length, n_patches, latent_dim)
-        prompt_sequences = torch.stack(sampled_prompts, dim=0)
+        with torch.no_grad():
+            # Sample 4 random prompt sequences from the dataset
+            prompt_batch_size = 4
+            sampled_prompts = []
+            for _ in range(prompt_batch_size):
+                idx = torch.randint(0, len(dataset), (1,)).item()
+                prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
+                # Take first past_context_length frames as prompt
+                sampled_prompts.append(prompt_seq[:past_context_length])
+            
+            # Stack prompts: (batch_size, past_context_length, n_patches, latent_dim)
+            prompt_sequences = torch.stack(sampled_prompts, dim=0)
+            
+            # Generate videos and get as numpy array directly (batch, frames, C, H, W)
+            video_array = generate_and_save_video(
+                dit_model=dit_model,
+                vae_model=vae_model,
+                video_path=None,  # Not used when return_arrays=True
+                num_frames=16,
+                past_context_length=past_context_length,
+                max_seq_len=max_seq_len,
+                n_patches=n_patches,
+                latent_dim=latent_dim,
+                fps=12,
+                device=device,
+                batch_size=prompt_batch_size,
+                prompt_sequences=prompt_sequences,
+                return_arrays=True
+            )
+            
+            if video_array is not None:
+                # Log each video separately to wandb
+                for i in range(video_array.shape[0]):
+                    wandb.log({
+                        f'{log_prefix}_{i}': wandb.Video(video_array[i], fps=12, format="mp4"),
+                        step_key: step_value
+                    })
+                print(f"Logged {video_array.shape[0]} video samples to wandb")
         
-        # Generate videos and get as numpy array directly (batch, frames, C, H, W)
-        video_array = generate_and_save_video(
-            dit_model=dit_model,
-            vae_model=vae_model,
-            video_path=None,  # Not used when return_arrays=True
-            num_frames=16,
-            past_context_length=past_context_length,
-            max_seq_len=max_seq_len,
-            n_patches=n_patches,
-            latent_dim=latent_dim,
-            fps=12,
-            device=device,
-            batch_size=prompt_batch_size,
-            prompt_sequences=prompt_sequences,
-            return_arrays=True
-        )
-        
-        if video_array is not None:
-            # Log each video separately to wandb
-            for i in range(video_array.shape[0]):
-                wandb.log({
-                    f'{log_prefix}_{i}': wandb.Video(video_array[i], fps=12, format="mp4"),
-                    step_key: step_value
-                })
-            print(f"Logged {video_array.shape[0]} video samples to wandb")
+        # Restore train mode
+        dit_model.train()
+        if vae_model is not None:
+            vae_model.train()
+            
     except Exception as e:
         print(f"Failed to generate video sample: {e}")
+        # Ensure we restore train mode even on error
+        dit_model.train()
+        if vae_model is not None:
+            vae_model.train()
 
 
 def train_dit(dataset_path: str,
@@ -182,7 +198,7 @@ def train_dit(dataset_path: str,
     
     dataset = EncodedDataset(dataset_file, sequence_length=sequence_length, max_frames=max_frames)
     
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
     
     # Setup model
     device = get_device()
@@ -196,11 +212,12 @@ def train_dit(dataset_path: str,
     ).to(device)
     
     # Load VAE for video generation
-    vae_model = VAE2(size=2, latent_dim=latent_dim).to(device)
-    vae_checkpoint_path = "./models/vae_size2_latent48.safetensors"
+    vae_checkpoint_path = os.path.join(save_dir, f"vae_size2_latent{latent_dim}.safetensors")
     if os.path.exists(vae_checkpoint_path):
+        vae_model = VAE2(size=2, latent_dim=latent_dim).to(device)
         vae_state_dict = load_file(vae_checkpoint_path)
         vae_model.load_state_dict(vae_state_dict)
+        vae_model.eval()  # Set to eval mode by default
         print(f"Loaded VAE from {vae_checkpoint_path}")
     else:
         print(f"Warning: VAE checkpoint not found at {vae_checkpoint_path}, skipping video generation")
@@ -210,7 +227,7 @@ def train_dit(dataset_path: str,
     atexit.register(cleanup_memory)
     
     # Setup optimizer with weight decay for regularization
-    optimizer = optim.AdamW(dit_model.parameters(), lr=learning_rate, weight_decay=0.1)
+    optimizer = optim.AdamW(dit_model.parameters(), lr=learning_rate, weight_decay=0.01)
     
     # Setup mixed precision training
     scaler = torch.amp.GradScaler("cuda")
@@ -258,12 +275,15 @@ def train_dit(dataset_path: str,
             start_epoch = 0
             global_batch_idx = 0
     
+    print(f"\n{'='*60}")
     print(f"Starting DiT training from epoch {start_epoch}")
+    print(f"WandB run: {wandb.run.name} (ID: {wandb.run.id})")
     print(f"Dataset size: {len(dataset)} sequences")
     print(f"Batches per epoch: {len(dataloader)}")
     print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
     print(f"Mixed precision training: enabled")
+    print(f"{'='*60}\n")
     
     # Training loop
     dit_model.train()
@@ -276,6 +296,7 @@ def train_dit(dataset_path: str,
     
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
+        valid_batches = 0
         optimizer.zero_grad()
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
@@ -301,6 +322,7 @@ def train_dit(dataset_path: str,
                 # Update metrics (unscaled loss for logging)
                 running_loss += loss.item() * gradient_accumulation_steps
                 epoch_loss += loss.item() * gradient_accumulation_steps
+                valid_batches += 1
                 
                 # Only step optimizer every gradient_accumulation_steps
                 if (batch_idx + 1) % gradient_accumulation_steps == 0:
@@ -322,7 +344,7 @@ def train_dit(dataset_path: str,
                 # Update progress bar
                 pbar.set_postfix({
                     'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
-                    'avg_loss': f"{running_loss / (batch_idx + 1):.4f}",
+                    'avg_loss': f"{running_loss / valid_batches:.4f}",
                     'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
                     'grad_norm': f"{grad_norm:.3f}",
                     'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
@@ -331,7 +353,7 @@ def train_dit(dataset_path: str,
                 # Log to wandb every batch
                 wandb.log({
                     'train/loss': loss.item() * gradient_accumulation_steps,
-                    'train/avg_loss': running_loss / (batch_idx + 1),
+                    'train/avg_loss': running_loss / valid_batches,
                     'train/learning_rate': optimizer.param_groups[0]['lr'],
                     'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                     'train/grad_scaler_scale': scaler.get_scale(),
@@ -361,7 +383,7 @@ def train_dit(dataset_path: str,
                     last_checkpoint_time = current_time
         
         # Calculate epoch averages
-        avg_epoch_loss = epoch_loss / len(dataloader)
+        avg_epoch_loss = epoch_loss / valid_batches if valid_batches > 0 else 0.0
         
         print(f"Epoch {epoch+1} completed:")
         print(f"  Average Loss: {avg_epoch_loss:.4f}")
