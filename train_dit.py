@@ -430,11 +430,11 @@ def main():
                        help="Latent dimension per patch")
     parser.add_argument("--n_patches", type=int, default=220,
                        help="Number of patches per frame")
-    parser.add_argument("--embed_dim", type=int, default=768,
+    parser.add_argument("--embed_dim", type=int, default=512,
                        help="Transformer embedding dimension")
     parser.add_argument("--num_layers", type=int, default=12,
                        help="Number of transformer layers")
-    parser.add_argument("--num_heads", type=int, default=16,
+    parser.add_argument("--num_heads", type=int, default=8,
                        help="Number of attention heads")
     parser.add_argument("--max_seq_len", type=int, default=16,
                        help="Maximum sequence length")
@@ -442,7 +442,7 @@ def main():
                        help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=1000000,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=2e-4,
+    parser.add_argument("--learning_rate", type=float, default=1e-4,
                        help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./models",
                        help="Directory to save model checkpoints")
