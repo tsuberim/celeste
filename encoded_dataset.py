@@ -12,7 +12,7 @@ from vae2 import reparameterize
 class EncodedDataset:
     def __init__(self, 
                  h5_path: str, 
-                 sequence_length: int = 16,
+                 sequence_length: int = 24,
                  max_frames: int = None):
         """
         Dataset for reading encoded video frames from H5 files.

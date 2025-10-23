@@ -104,7 +104,7 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
                 dit_model=dit_model,
                 vae_model=vae_model,
                 video_path=None,  # Not used when return_arrays=True
-                num_frames=16,
+                num_frames=24,
                 past_context_length=past_context_length,
                 max_seq_len=max_seq_len,
                 n_patches=n_patches,
@@ -139,19 +139,19 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
 
 
 def train_dit(dataset_path: str,
-              sequence_length: int = 16,
+              sequence_length: int = 24,
               latent_dim: int = 48,
               n_patches: int = 220,
               embed_dim: int = 512,
               num_layers: int = 12,
               num_heads: int = 8,
-              max_seq_len: int = 16,
+              max_seq_len: int = 24,
               batch_size: int = 4,
               num_epochs: int = 1000000,
               learning_rate: float = 1e-3,
               save_dir: str = "./models",
               max_frames: int = None,
-              past_context_length: int = 15,
+              past_context_length: int = 23,
               gradient_accumulation_steps: int = 4):
     """Train DiT on encoded video dataset"""
     
@@ -338,29 +338,35 @@ def train_dit(dataset_path: str,
                     optimizer.zero_grad()
                     
                     global_batch_idx += 1
+                    
+                    # Log to wandb only when we step
+                    wandb.log({
+                        'train/loss': loss.item() * gradient_accumulation_steps,
+                        'train/avg_loss': running_loss / valid_batches,
+                        'train/learning_rate': optimizer.param_groups[0]['lr'],
+                        'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
+                        'train/grad_scaler_scale': scaler.get_scale(),
+                        'train/velocity_scale': dit_model.velocity_scale.item(),
+                        'train/epoch': epoch,
+                        'train/global_step': global_batch_idx
+                    })
+                    
+                    # Update progress bar
+                    pbar.set_postfix({
+                        'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
+                        'avg_loss': f"{running_loss / valid_batches:.4f}",
+                        'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
+                        'grad_norm': f"{grad_norm:.3f}",
+                        'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
+                    })
                 else:
-                    grad_norm = 0.0
-                
-                # Update progress bar
-                pbar.set_postfix({
-                    'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
-                    'avg_loss': f"{running_loss / valid_batches:.4f}",
-                    'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
-                    'grad_norm': f"{grad_norm:.3f}",
-                    'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
-                })
-                
-                # Log to wandb every batch
-                wandb.log({
-                    'train/loss': loss.item() * gradient_accumulation_steps,
-                    'train/avg_loss': running_loss / valid_batches,
-                    'train/learning_rate': optimizer.param_groups[0]['lr'],
-                    'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
-                    'train/grad_scaler_scale': scaler.get_scale(),
-                    'train/velocity_scale': dit_model.velocity_scale.item(),
-                    'train/epoch': epoch,
-                    'train/global_step': global_batch_idx
-                })
+                    # Update progress bar without grad norm during accumulation
+                    pbar.set_postfix({
+                        'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
+                        'avg_loss': f"{running_loss / valid_batches:.4f}",
+                        'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
+                        'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
+                    })
                 
                 # Check if 15 minutes have elapsed since last checkpoint
                 current_time = time.time()
@@ -424,7 +430,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train DiT model on encoded video dataset")
     parser.add_argument("dataset_path", type=str, 
                        help="Path to encoded dataset (H5 file or directory)")
-    parser.add_argument("--sequence_length", type=int, default=16,
+    parser.add_argument("--sequence_length", type=int, default=24,
                        help="Sequence length for training")
     parser.add_argument("--latent_dim", type=int, default=48,
                        help="Latent dimension per patch")
@@ -432,23 +438,23 @@ def main():
                        help="Number of patches per frame")
     parser.add_argument("--embed_dim", type=int, default=512,
                        help="Transformer embedding dimension")
-    parser.add_argument("--num_layers", type=int, default=12,
+    parser.add_argument("--num_layers", type=int, default=6,
                        help="Number of transformer layers")
     parser.add_argument("--num_heads", type=int, default=8,
                        help="Number of attention heads")
-    parser.add_argument("--max_seq_len", type=int, default=16,
+    parser.add_argument("--max_seq_len", type=int, default=24,
                        help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=64,
                        help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=1000000,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=1e-4,
+    parser.add_argument("--learning_rate", type=float, default=5e-4,
                        help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./models",
                        help="Directory to save model checkpoints")
     parser.add_argument("--max_frames", type=int, default=None,
                        help="Maximum number of frames to load from dataset (None for all)")
-    parser.add_argument("--past_context_length", type=int, default=15,
+    parser.add_argument("--past_context_length", type=int, default=23,
                        help="Past context length")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
                        help="Number of gradient accumulation steps")

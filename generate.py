@@ -40,10 +40,13 @@ class ODEFlowSolver:
         batch_size, seq_len, n_patches, latent_dim = gen_frames.shape
 
         # Define ODE function for scipy
-        def ode_func(t, x_flat):
+        def ode_func(t_scalar, x_flat):
             f_frames = x_flat
             batch = torch.cat([gen_frames, f_frames], dim=1)
-            t = torch.full((batch_size,), t, device=batch.device)
+            # Create per-frame time values: (batch_size, total_seq_len)
+            total_seq_len = batch.shape[1]
+            t = torch.full((batch_size, total_seq_len), 1.0, device=batch.device)
+            t[:, gen_frames.shape[1]:] = t_scalar
             velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
             return velocity
         
@@ -82,7 +85,7 @@ class ODEFlowSolver:
                 x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
             return x
 
-        final_state = euler_solve_mps(future_frames, steps=30)
+        final_state = euler_solve_mps(future_frames, steps=10)
         
         # Get final state and reshape
         # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
@@ -98,9 +101,9 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
                                  max_frames: int,
                                  n_patches: int = 220,
                                  latent_dim: int = 48,
-                                 max_seq_len: int = 16,
+                                 max_seq_len: int = 24,
                                  device: torch.device = None,
-                                 past_context_length: int = 15,
+                                 past_context_length: int = 23,
                                  prompt_video_path: str = None,
                                  prompt_max_frames: int = None,
                                  batch_size: int = 1,
@@ -322,9 +325,9 @@ def main():
     parser.add_argument("--vae_checkpoint", type=str, 
                        default="./models/vae_size2_latent48.safetensors",
                        help="Path to VAE model checkpoint")
-    parser.add_argument("--max_frames", type=int, default=16,
+    parser.add_argument("--max_frames", type=int, default=24,
                        help="Number of frames to generate")
-    parser.add_argument("--max_seq_len", type=int, default=16,
+    parser.add_argument("--max_seq_len", type=int, default=24,
                        help="Maximum context length for DiT")
     parser.add_argument("--output", type=str, default="generated_video.mp4",
                        help="Output video path")
@@ -340,7 +343,7 @@ def main():
                        help="Number of patches per frame")
     parser.add_argument("--vae_size", type=int, default=2,
                        help="VAE size parameter")
-    parser.add_argument("--past_context_length", type=int, default=15,
+    parser.add_argument("--past_context_length", type=int, default=23,
                        help="Past context length")
     parser.add_argument("--num_heads", type=int, default=16,
                        help="Number of attention heads")
@@ -443,8 +446,8 @@ def main():
     print(f"Generation complete! {B} video(s) saved.")
 
 
-def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 16, 
-                         past_context_length: int = 15, max_seq_len: int = 16, 
+def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 24, 
+                         past_context_length: int = 23, max_seq_len: int = 24, 
                          n_patches: int = 220, latent_dim: int = 48, fps: int = 12, device=None,
                          batch_size: int = 4, prompt_sequences: torch.Tensor = None,
                          return_arrays: bool = False):

@@ -34,7 +34,7 @@ class RMSNorm(nn.Module):
 class MultiHeadAttentionWithRoPE(nn.Module):
     """Multi-head spatio-temporal attention with rotary positional embeddings using torchtune's RoPE"""
     
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 16):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 24):
         super().__init__()
         assert embed_dim % num_heads == 0
         
@@ -196,7 +196,7 @@ class FeedForward(nn.Module):
 class DiTBlock(nn.Module):
     """Diffusion Transformer block with RoPE attention, feed-forward, and FiLM conditioning"""
     
-    def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 16):
+    def __init__(self, embed_dim: int, num_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 1024, n_patches: int = 220, num_frames: int = 24):
         super().__init__()
         self.norm1 = RMSNorm(embed_dim)
         self.attn = MultiHeadAttentionWithRoPE(embed_dim, num_heads, dropout, max_seq_len, n_patches, num_frames)
@@ -217,31 +217,27 @@ class DiTBlock(nn.Module):
         
         Args:
             x: Input tensor (batch_size, seq_len, embed_dim)
-            t_emb: Time embeddings (batch_size, embed_dim)
+            t_emb: Time embeddings (batch_size, seq_len, embed_dim) - per-patch time embeddings
             use_causal: Whether to use causal masking
             
         Returns:
             Output tensor (batch_size, seq_len, embed_dim)
         """
-        # Get FiLM parameters from time embedding
-        film_params = self.film_mlp(t_emb)  # (batch_size, embed_dim * 4)
-        scale1, shift1, scale2, shift2 = film_params.chunk(4, dim=-1)  # Each: (batch_size, embed_dim)
+        # Get FiLM parameters from time embedding (per-patch)
+        film_params = self.film_mlp(t_emb)  # (batch_size, seq_len, embed_dim * 4)
+        scale1, shift1, scale2, shift2 = film_params.chunk(4, dim=-1)  # Each: (batch_size, seq_len, embed_dim)
         
-        # Reshape for broadcasting: (batch_size, 1, embed_dim)
-        scale1 = scale1.unsqueeze(1)
-        shift1 = shift1.unsqueeze(1)
-        scale2 = scale2.unsqueeze(1)
-        shift2 = shift2.unsqueeze(1)
+        # No need to unsqueeze - already has the right shape for element-wise operations
         
         # Attention block with FiLM conditioning
         h1 = self.norm1(x)
-        h1 = h1 * (1 + scale1) + shift1  # FiLM modulation
+        h1 = h1 * (1 + scale1) + shift1  # FiLM modulation (element-wise)
         h1 = self.attn(h1, use_causal)
         x = x + h1
         
         # Feed-forward block with FiLM conditioning
         h2 = self.norm2(x)
-        h2 = h2 * (1 + scale2) + shift2  # FiLM modulation
+        h2 = h2 * (1 + scale2) + shift2  # FiLM modulation (element-wise)
         h2 = self.ff(h2)
         x = x + h2
         
@@ -261,7 +257,7 @@ class DiffusionTransformer(nn.Module):
                  num_layers: int = 12,
                  num_heads: int = 8,
                  ff_dim: int = 2048,
-                 max_seq_len: int = 16,
+                 max_seq_len: int = 24,
                  dropout: float = 0.1):
         """
         Args:
@@ -305,7 +301,7 @@ class DiffusionTransformer(nn.Module):
         self.norm = RMSNorm(embed_dim)
 
         # Learnable velocity scale
-        self.velocity_scale = nn.Parameter(torch.tensor(2.0))
+        self.velocity_scale = nn.Parameter(torch.tensor(10.0))
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -367,7 +363,7 @@ class DiffusionTransformer(nn.Module):
         
         Args:
             x: Input sequence (batch_size, seq_len, n_patches, latent_dim)
-            t: Time parameter (batch_size,) for flow matching
+            t: Time parameter (batch_size, seq_len) for flow matching - per-frame time values
             use_causal_mask: Whether to use causal masking for autoregressive prediction
             
         Returns:
@@ -375,9 +371,17 @@ class DiffusionTransformer(nn.Module):
         """
         batch_size, seq_len, n_patches, latent_dim = x.shape
         
-        # Get time embeddings
-        t_emb = self.get_timestep_embedding(t)  # (batch_size, time_embed_dim)
-        t_emb = self.time_mlp(t_emb)  # (batch_size, embed_dim)
+        # Get time embeddings for each frame
+        # Flatten to (batch_size * seq_len,) for embedding lookup
+        t_flat = t.reshape(-1)  # (batch_size * seq_len,)
+        t_emb = self.get_timestep_embedding(t_flat)  # (batch_size * seq_len, time_embed_dim)
+        t_emb = self.time_mlp(t_emb)  # (batch_size * seq_len, embed_dim)
+        
+        # Reshape to have per-frame embeddings and broadcast across patches
+        # (batch_size * seq_len, embed_dim) -> (batch_size, seq_len, embed_dim) -> (batch_size, seq_len * n_patches, embed_dim)
+        t_emb = t_emb.reshape(batch_size, seq_len, self.embed_dim)
+        t_emb = t_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches, self.embed_dim)
+        t_emb = t_emb.reshape(batch_size, seq_len * n_patches, self.embed_dim)
         
         # Flatten spatial and temporal dimensions: (batch_size, seq_len * n_patches, latent_dim)
         x_flat = x.reshape(batch_size, seq_len * n_patches, latent_dim)
@@ -385,11 +389,7 @@ class DiffusionTransformer(nn.Module):
         # Project each patch to embedding space
         x_emb = self.input_proj(x_flat)  # (batch_size, seq_len * n_patches, embed_dim)
         
-        # Add time conditioning: broadcast time embedding across all patches
-        # This tells the model what timestep t it's at in the flow
-        # x_emb = x_emb + t_emb.unsqueeze(1)  # (batch_size, seq_len * n_patches, embed_dim)
-        
-        # Apply transformer blocks with spatio-temporal causal masking
+        # Apply transformer blocks with per-patch time conditioning
         for block in self.blocks:
             x_emb = block(x_emb, t_emb, use_causal_mask)
         
@@ -413,7 +413,7 @@ def create_dit(latent_dim: int,
                embed_dim: int = 768,
                num_layers: int = 12,
                num_heads: int = 8,
-               max_seq_len: int = 16) -> DiffusionTransformer:
+               max_seq_len: int = 24) -> DiffusionTransformer:
     """
     Create a Diffusion Transformer model
     
@@ -452,16 +452,16 @@ def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_co
     Returns:
         Flow matching loss
     """
-    batch_size = batch.shape[0]
+    batch_size, seq_len = batch.shape[0], batch.shape[1]
     
     # Sample noise
     prior = torch.randn_like(batch)
     
-    # Sample time uniformly from [0, 1] for each batch item
-    t = torch.rand(batch_size, device=batch.device)
+    # Sample time uniformly from [0, 1] for each batch item and each frame
+    t = torch.rand(batch_size, seq_len, device=batch.device)
     
-    # Linear interpolation between prior and data
-    x_t = (1 - t.view(-1, 1, 1, 1)) * prior + t.view(-1, 1, 1, 1) * batch
+    # Linear interpolation between prior and data (broadcast t correctly)
+    x_t = (1 - t.view(batch_size, seq_len, 1, 1)) * prior + t.view(batch_size, seq_len, 1, 1) * batch
     
     # Predict velocity field
     v_pred = model(x_t, t)
@@ -492,12 +492,12 @@ def test_dit():
         embed_dim=512,
         num_layers=6,  # Smaller for testing
         num_heads=8,
-        max_seq_len=16
+        max_seq_len=24
     )
     
     # Create dummy input
     x = torch.randn(batch_size, seq_len, n_patches, latent_dim)
-    t = torch.rand(batch_size)  # Random time values
+    t = torch.rand(batch_size, seq_len)  # Random time values per frame
     print(f"Input shape: {x.shape}")
     print(f"Time shape: {t.shape}")
     
@@ -508,7 +508,7 @@ def test_dit():
     
     # Test flow matching loss
     print("\nTesting flow matching loss...")
-    loss = flow_matching_loss(dit, x, 16)
+    loss = flow_matching_loss(dit, x, 23)
     print(f"Flow matching loss: {loss.item():.6f}")
     
     # Test RoPE
