@@ -299,9 +299,6 @@ class DiffusionTransformer(nn.Module):
         
         # Final RMS norm
         self.norm = RMSNorm(embed_dim)
-
-        # Learnable velocity scale
-        self.velocity_scale = nn.Parameter(torch.tensor(10.0))
         
         # Initialize weights
         self.apply(self._init_weights)
@@ -402,8 +399,6 @@ class DiffusionTransformer(nn.Module):
         # Reshape back to (batch_size, seq_len, n_patches, latent_dim)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
         
-        # Apply learnable velocity scale
-        output = output * self.velocity_scale
         return output
     
 

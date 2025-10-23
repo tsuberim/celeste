@@ -346,7 +346,6 @@ def train_dit(dataset_path: str,
                         'train/learning_rate': optimizer.param_groups[0]['lr'],
                         'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                         'train/grad_scaler_scale': scaler.get_scale(),
-                        'train/velocity_scale': dit_model.velocity_scale.item(),
                         'train/epoch': epoch,
                         'train/global_step': global_batch_idx
                     })
@@ -436,11 +435,11 @@ def main():
                        help="Latent dimension per patch")
     parser.add_argument("--n_patches", type=int, default=220,
                        help="Number of patches per frame")
-    parser.add_argument("--embed_dim", type=int, default=512,
+    parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
-    parser.add_argument("--num_layers", type=int, default=6,
+    parser.add_argument("--num_layers", type=int, default=12,
                        help="Number of transformer layers")
-    parser.add_argument("--num_heads", type=int, default=8,
+    parser.add_argument("--num_heads", type=int, default=16,
                        help="Number of attention heads")
     parser.add_argument("--max_seq_len", type=int, default=24,
                        help="Maximum sequence length")
@@ -448,7 +447,7 @@ def main():
                        help="Batch size for training")
     parser.add_argument("--num_epochs", type=int, default=1000000,
                        help="Number of training epochs")
-    parser.add_argument("--learning_rate", type=float, default=5e-4,
+    parser.add_argument("--learning_rate", type=float, default=2e-4,
                        help="Learning rate")
     parser.add_argument("--save_dir", type=str, default="./models",
                        help="Directory to save model checkpoints")
