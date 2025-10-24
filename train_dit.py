@@ -317,8 +317,7 @@ def train_dit(dataset_path: str,
                 t = torch.rand(batch_size, seq_len, device=x_1.device)
 
                 self_forcing_percent = 0.2
-                self_force = np.random.rand() < self_forcing_percent
-                if self_force:
+                while self_force := np.random.rand() < self_forcing_percent:
                     self_forcing_count += 1
                     t_mid = torch.rand(batch_size, seq_len, device=t.device)
                     x_mid = interpolate(x_0, x_1, t_mid)
@@ -329,7 +328,6 @@ def train_dit(dataset_path: str,
                             x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
                     x_0 = x_0.detach()
                     
-
                 x_t = interpolate(x_0, x_1, t)
                 v_t = x_1 - x_0
                 
