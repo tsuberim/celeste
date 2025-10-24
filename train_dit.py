@@ -276,6 +276,13 @@ def train_dit(dataset_path: str,
             if 'optimizer_state_dict_adamw' in training_state:
                 optimizer_adamw.load_state_dict(training_state['optimizer_state_dict_adamw'])
             
+            # Override learning rate with the provided learning_rate parameter
+            for param_group in optimizer_muon.param_groups:
+                param_group['lr'] = learning_rate
+            for param_group in optimizer_adamw.param_groups:
+                param_group['lr'] = learning_rate
+            print(f"Learning rate set to {learning_rate}")
+            
             print(f"Checkpoint loaded: resuming from epoch {start_epoch}, batch {global_batch_idx}")
             
         except Exception as e:
@@ -290,6 +297,7 @@ def train_dit(dataset_path: str,
     print(f"Dataset size: {len(dataset)} sequences")
     print(f"Batches per epoch: {len(dataloader)}")
     print(f"Batch size: {batch_size}")
+    print(f"Learning rate - Muon: {optimizer_muon.param_groups[0]['lr']:.2e}, AdamW: {optimizer_adamw.param_groups[0]['lr']:.2e}")
     print(f"Mixed precision training: enabled")
     print(f"{'='*60}\n")
     
@@ -319,16 +327,17 @@ def train_dit(dataset_path: str,
                 self_forcing_percent = 0.2
                 self_force = False
                 while np.random.rand() < self_forcing_percent:
-                    self_forcing_count += 1
                     t_mid = torch.rand(batch_size, seq_len, device=t.device)
                     x_mid = interpolate(x_0, x_1, t_mid)
-                    # Forward pass with mixed precision
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):
                             v_t_mid_pred = dit_model(x_mid, t_mid)
                             x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
                     x_0 = x_0.detach()
                     self_force = True
+
+                if self_force:
+                    self_forcing_count += 1
                     
                 x_t = interpolate(x_0, x_1, t)
                 v_t = x_1 - x_0
