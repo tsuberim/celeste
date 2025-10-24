@@ -139,6 +139,10 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
         if vae_model is not None:
             vae_model.train()
 
+def interpolate(x_0, x_1, t):
+    batch_size, seq_len = x_0.shape[0], x_0.shape[1]
+    x_t = (1 - t.view(batch_size, seq_len, 1, 1)) * x_0 + t.view(batch_size, seq_len, 1, 1) * x_1
+    return x_t
 
 def train_dit(dataset_path: str,
               sequence_length: int = 24,
@@ -304,95 +308,97 @@ def train_dit(dataset_path: str,
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for batch_idx, batch_data in enumerate(pbar):
-                batch = batch_data.to(device)
+                x_1 = batch_data.to(device)
                 
-                pred_steps = 2
-                prior = torch.randn_like(batch)
-                v_target = batch - prior
-                batch_size, seq_len = batch.shape[0], batch.shape[1]
-                t = torch.rand(batch_size, seq_len, device=batch.device)
-                x_t = (1 - t.view(batch_size, seq_len, 1, 1)) * prior + t.view(batch_size, seq_len, 1, 1) * batch
-                dt = (1 - t) / pred_steps
-                for i in range(pred_steps + 1):
-                    # Forward pass with mixed precision
-                    with torch.amp.autocast("cuda"):
-                        v_t_pred = dit_model(x_t, t)
-                        loss = torch.nn.functional.mse_loss(v_t_pred, v_target)
-                        x_t = x_t + v_t_pred*dt.view(batch_size, seq_len, 1, 1)
-                        t = t + dt
+                x_0 = torch.randn_like(x_1)
+                v_t = x_1 - x_0
+                batch_size, seq_len = x_1.shape[0], x_1.shape[1]
+                t = torch.rand(batch_size, seq_len, device=x_1.device)
 
-                        x_t = x_t.detach()
-                        t = t.detach()
+                self_forcing_percent = 0.2
+                if np.random.rand() < self_forcing_percent:
+                    t_mid = torch.rand(batch_size, seq_len, device=t.device) * t
+                    x_mid = interpolate(x_0, x_1, t_mid)
+                    v_t_mid_pred = dit_model(x_mid, t_mid)
+                    x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
+                    x_0 = x_0.detach()
+
+                x_t = interpolate(x_0, x_1, t)
+                
+                # Forward pass with mixed precision
+                with torch.amp.autocast("cuda"):
+                    v_t_pred = dit_model(x_t, t)
+                    loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
+                
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}!")
+                    print(f"Skipping batch...")
+                    continue
+                
+                # Backward pass with gradient scaling
+                optimizer_muon.zero_grad()
+                optimizer_adamw.zero_grad()
+                scaler.scale(loss).backward()
+                
+                # Unscale gradients for clipping
+                scaler.unscale_(optimizer_muon)
+                scaler.unscale_(optimizer_adamw)
+                
+                # Gradient clipping and get grad norm
+                grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
+                
+                # Step optimizer with scaler
+                scaler.step(optimizer_muon)
+                scaler.step(optimizer_adamw)
+                scaler.update()
+                
+                # Update metrics
+                running_loss += loss.item()
+                epoch_loss += loss.item()
+                valid_batches += 1
+                global_batch_idx += 1
+                
+                # Log to wandb
+                wandb.log({
+                    'train/loss': loss.item(),
+                    'train/avg_loss': running_loss / valid_batches,
+                    'train/learning_rate_muon': optimizer_muon.param_groups[0]['lr'],
+                    'train/learning_rate_adamw': optimizer_adamw.param_groups[0]['lr'],
+                    'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
+                    'train/grad_scaler_scale': scaler.get_scale(),
+                    'train/epoch': epoch,
+                    'train/global_step': global_batch_idx
+                })
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'avg_loss': f"{running_loss / valid_batches:.4f}",
+                    'lr_muon': f"{optimizer_muon.param_groups[0]['lr']:.2e}",
+                    'lr_adamw': f"{optimizer_adamw.param_groups[0]['lr']:.2e}",
+                    'grad_norm': f"{grad_norm:.3f}"
+                })
+                
+                # Check if 15 minutes have elapsed since last checkpoint
+                current_time = time.time()
+                if current_time - last_checkpoint_time >= checkpoint_interval_seconds:
+                    print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
                     
-                    # Check for NaN loss
-                    if torch.isnan(loss):
-                        print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}!")
-                        print(f"Skipping batch...")
-                        continue
+                    # Save checkpoint
+                    save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
                     
-                    # Backward pass with gradient scaling
-                    optimizer_muon.zero_grad()
-                    optimizer_adamw.zero_grad()
-                    scaler.scale(loss).backward()
+                    # Generate video sample
+                    if vae_model is not None:
+                        generate_and_log_videos(
+                            dit_model, vae_model, dataset, past_context_length,
+                            max_seq_len, n_patches, latent_dim, device,
+                            log_prefix="generated_video",
+                            step_key="train/global_step",
+                            step_value=global_batch_idx
+                        )
                     
-                    # Unscale gradients for clipping
-                    scaler.unscale_(optimizer_muon)
-                    scaler.unscale_(optimizer_adamw)
-                    
-                    # Gradient clipping and get grad norm
-                    grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
-                    
-                    # Step optimizer with scaler
-                    scaler.step(optimizer_muon)
-                    scaler.step(optimizer_adamw)
-                    scaler.update()
-                    
-                    # Update metrics
-                    running_loss += loss.item()
-                    epoch_loss += loss.item()
-                    valid_batches += 1
-                    global_batch_idx += 1
-                    
-                    # Log to wandb
-                    wandb.log({
-                        'train/loss': loss.item(),
-                        'train/avg_loss': running_loss / valid_batches,
-                        'train/learning_rate_muon': optimizer_muon.param_groups[0]['lr'],
-                        'train/learning_rate_adamw': optimizer_adamw.param_groups[0]['lr'],
-                        'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
-                        'train/grad_scaler_scale': scaler.get_scale(),
-                        'train/epoch': epoch,
-                        'train/global_step': global_batch_idx
-                    })
-                    
-                    # Update progress bar
-                    pbar.set_postfix({
-                        'loss': f"{loss.item():.4f}",
-                        'avg_loss': f"{running_loss / valid_batches:.4f}",
-                        'lr_muon': f"{optimizer_muon.param_groups[0]['lr']:.2e}",
-                        'lr_adamw': f"{optimizer_adamw.param_groups[0]['lr']:.2e}",
-                        'grad_norm': f"{grad_norm:.3f}"
-                    })
-                    
-                    # Check if 15 minutes have elapsed since last checkpoint
-                    current_time = time.time()
-                    if current_time - last_checkpoint_time >= checkpoint_interval_seconds:
-                        print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
-                        
-                        # Save checkpoint
-                        save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
-                        
-                        # Generate video sample
-                        if vae_model is not None:
-                            generate_and_log_videos(
-                                dit_model, vae_model, dataset, past_context_length,
-                                max_seq_len, n_patches, latent_dim, device,
-                                log_prefix="generated_video",
-                                step_key="train/global_step",
-                                step_value=global_batch_idx
-                            )
-                        
-                        last_checkpoint_time = current_time
+                    last_checkpoint_time = current_time
         
         # Calculate epoch averages
         avg_epoch_loss = epoch_loss / valid_batches if valid_batches > 0 else 0.0
