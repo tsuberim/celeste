@@ -45,7 +45,7 @@ class ODEFlowSolver:
             batch = torch.cat([gen_frames, f_frames], dim=1)
             # Create per-frame time values: (batch_size, total_seq_len)
             total_seq_len = batch.shape[1]
-            t = torch.full((batch_size, total_seq_len), 1.0, device=batch.device)
+            t = torch.full((batch_size, total_seq_len), .95, device=batch.device)
             t[:, gen_frames.shape[1]:] = t_scalar
             velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
             return velocity
