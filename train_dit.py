@@ -34,8 +34,8 @@ def cleanup_memory():
     print("Memory cleanup completed via atexit")
 
 
-def save_model(dit_model, save_dir: str, epoch: int, optimizer=None,
-               global_batch_idx=None, hyperparams=None):
+def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
+               optimizer_adamw=None, global_batch_idx=None, hyperparams=None):
     """Save DiT model checkpoint and training state"""
     os.makedirs(save_dir, exist_ok=True)
     
@@ -63,8 +63,10 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer=None,
         'model_state_dict': state_dict,
     }
     
-    if optimizer is not None:
-        training_state['optimizer_state_dict'] = optimizer.state_dict()
+    if optimizer_muon is not None:
+        training_state['optimizer_state_dict_muon'] = optimizer_muon.state_dict()
+    if optimizer_adamw is not None:
+        training_state['optimizer_state_dict_adamw'] = optimizer_adamw.state_dict()
     
     # Save training state with same naming convention
     training_filename = filename.replace('.safetensors', '_training_state.pt')
@@ -224,7 +226,10 @@ def train_dit(dataset_path: str,
     atexit.register(cleanup_memory)
     
     # Setup optimizer with weight decay for regularization
-    optimizer = optim.Muon(dit_model.parameters(), lr=learning_rate, weight_decay=0.01)
+    params_2d = [param for param in dit_model.parameters() if param.ndim == 2]
+    params_other = [param for param in dit_model.parameters() if param.ndim != 2]
+    optimizer_muon = optim.Muon(params_2d, lr=learning_rate, weight_decay=0.01)
+    optimizer_adamw = optim.AdamW(params_other, lr=learning_rate, weight_decay=0.01)
     
     # Setup mixed precision training
     scaler = torch.amp.GradScaler("cuda")
@@ -261,8 +266,11 @@ def train_dit(dataset_path: str,
             start_epoch = training_state.get('epoch', 0)
             global_batch_idx = training_state.get('global_batch_idx', 0)
             
-            if 'optimizer_state_dict' in training_state:
-                optimizer.load_state_dict(training_state['optimizer_state_dict'])
+            if 'optimizer_state_dict_muon' in training_state:
+                optimizer_muon.load_state_dict(training_state['optimizer_state_dict_muon'])
+
+            if 'optimizer_state_dict_adamw' in training_state:
+                optimizer_adamw.load_state_dict(training_state['optimizer_state_dict_adamw'])
             
             print(f"Checkpoint loaded: resuming from epoch {start_epoch}, batch {global_batch_idx}")
             
@@ -323,17 +331,20 @@ def train_dit(dataset_path: str,
                         continue
                     
                     # Backward pass with gradient scaling
-                    optimizer.zero_grad()
+                    optimizer_muon.zero_grad()
+                    optimizer_adamw.zero_grad()
                     scaler.scale(loss).backward()
                     
                     # Unscale gradients for clipping
-                    scaler.unscale_(optimizer)
+                    scaler.unscale_(optimizer_muon)
+                    scaler.unscale_(optimizer_adamw)
                     
                     # Gradient clipping and get grad norm
                     grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
                     
                     # Step optimizer with scaler
-                    scaler.step(optimizer)
+                    scaler.step(optimizer_muon)
+                    scaler.step(optimizer_adamw)
                     scaler.update()
                     
                     # Update metrics
@@ -346,7 +357,8 @@ def train_dit(dataset_path: str,
                     wandb.log({
                         'train/loss': loss.item(),
                         'train/avg_loss': running_loss / valid_batches,
-                        'train/learning_rate': optimizer.param_groups[0]['lr'],
+                        'train/learning_rate_muon': optimizer_muon.param_groups[0]['lr'],
+                        'train/learning_rate_adamw': optimizer_adamw.param_groups[0]['lr'],
                         'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                         'train/grad_scaler_scale': scaler.get_scale(),
                         'train/epoch': epoch,
@@ -357,7 +369,8 @@ def train_dit(dataset_path: str,
                     pbar.set_postfix({
                         'loss': f"{loss.item():.4f}",
                         'avg_loss': f"{running_loss / valid_batches:.4f}",
-                        'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
+                        'lr_muon': f"{optimizer_muon.param_groups[0]['lr']:.2e}",
+                        'lr_adamw': f"{optimizer_adamw.param_groups[0]['lr']:.2e}",
                         'grad_norm': f"{grad_norm:.3f}"
                     })
                     
@@ -367,7 +380,7 @@ def train_dit(dataset_path: str,
                         print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
                         
                         # Save checkpoint
-                        save_model(dit_model, save_dir, epoch + 1, optimizer, global_batch_idx, hyperparams)
+                        save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
                         
                         # Generate video sample
                         if vae_model is not None:
@@ -395,7 +408,7 @@ def train_dit(dataset_path: str,
         
         # Save model checkpoint after each epoch
         print(f"\nSaving checkpoint after epoch {epoch+1}...")
-        save_model(dit_model, save_dir, epoch + 1, optimizer, global_batch_idx, hyperparams)
+        save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
         
         # Generate and log video after each epoch
         if vae_model is not None:
@@ -413,7 +426,7 @@ def train_dit(dataset_path: str,
         running_loss = 0.0
     
     # Final save
-    save_model(dit_model, save_dir, num_epochs, optimizer, global_batch_idx, hyperparams)
+    save_model(dit_model, save_dir, num_epochs, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
     
     print("Training completed!")
     wandb.finish()
