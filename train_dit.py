@@ -311,7 +311,6 @@ def train_dit(dataset_path: str,
                 x_1 = batch_data.to(device)
                 
                 x_0 = torch.randn_like(x_1)
-                v_t = x_1 - x_0
                 batch_size, seq_len = x_1.shape[0], x_1.shape[1]
                 t = torch.rand(batch_size, seq_len, device=x_1.device)
 
@@ -320,7 +319,6 @@ def train_dit(dataset_path: str,
                     t_mid = torch.rand(batch_size, seq_len, device=t.device)
                     x_mid = interpolate(x_0, x_1, t_mid)
                     # Forward pass with mixed precision
-                    dit_model.eval()
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):
                             v_t_mid_pred = dit_model(x_mid, t_mid)
@@ -329,9 +327,9 @@ def train_dit(dataset_path: str,
                     
 
                 x_t = interpolate(x_0, x_1, t)
+                v_t = x_1 - x_0
                 
                 # Forward pass with mixed precision
-                dit_model.train()
                 with torch.amp.autocast("cuda"):
                     v_t_pred = dit_model(x_t, t)
                     loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
