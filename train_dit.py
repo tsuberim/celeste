@@ -151,8 +151,7 @@ def train_dit(dataset_path: str,
               learning_rate: float = 1e-3,
               save_dir: str = "./models",
               max_frames: int = None,
-              past_context_length: int = 23,
-              gradient_accumulation_steps: int = 4):
+              past_context_length: int = 23):
     """Train DiT on encoded video dataset"""
     
     # Initialize wandb
@@ -172,8 +171,6 @@ def train_dit(dataset_path: str,
             "learning_rate": learning_rate,
             "max_frames": max_frames,
             "past_context_length": past_context_length,
-            "gradient_accumulation_steps": gradient_accumulation_steps,
-            "effective_batch_size": batch_size * gradient_accumulation_steps,
         }
     )
     
@@ -280,8 +277,7 @@ def train_dit(dataset_path: str,
     print(f"WandB run: {wandb.run.name} (ID: {wandb.run.id})")
     print(f"Dataset size: {len(dataset)} sequences")
     print(f"Batches per epoch: {len(dataloader)}")
-    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
-    print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
+    print(f"Batch size: {batch_size}")
     print(f"Mixed precision training: enabled")
     print(f"{'='*60}\n")
     
@@ -297,35 +293,39 @@ def train_dit(dataset_path: str,
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
         valid_batches = 0
-        optimizer.zero_grad()
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for batch_idx, batch_data in enumerate(pbar):
-                sequences = batch_data.to(device)
+                batch = batch_data.to(device)
                 
-                # Forward pass with mixed precision
-                with torch.amp.autocast("cuda"):
-                    loss = flow_matching_loss(dit_model, sequences, past_context_length)
-                
-                # Check for NaN loss
-                if torch.isnan(loss):
-                    print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}!")
-                    print(f"Skipping batch...")
-                    continue
-                
-                # Scale loss by accumulation steps
-                loss = loss / gradient_accumulation_steps
-                
-                # Backward pass with gradient scaling
-                scaler.scale(loss).backward()
-                
-                # Update metrics (unscaled loss for logging)
-                running_loss += loss.item() * gradient_accumulation_steps
-                epoch_loss += loss.item() * gradient_accumulation_steps
-                valid_batches += 1
-                
-                # Only step optimizer every gradient_accumulation_steps
-                if (batch_idx + 1) % gradient_accumulation_steps == 0:
+                pred_steps = 2
+                prior = torch.randn_like(batch)
+                v_target = batch - prior
+                batch_size, seq_len = batch.shape[0], batch.shape[1]
+                t = torch.rand(batch_size, seq_len, device=batch.device)
+                x_t = (1 - t.view(batch_size, seq_len, 1, 1)) * prior + t.view(batch_size, seq_len, 1, 1) * batch
+                dt = (1 - t) / pred_steps
+                for i in range(pred_steps + 1):
+                    # Forward pass with mixed precision
+                    with torch.amp.autocast("cuda"):
+                        v_t_pred = dit_model(x_t, t)
+                        loss = torch.nn.functional.mse_loss(v_t_pred, v_target)
+                        x_t = x_t + v_t_pred*dt.view(batch_size, seq_len, 1, 1)
+                        t = t + dt
+
+                        x_t = x_t.detach()
+                        t = t.detach()
+                    
+                    # Check for NaN loss
+                    if torch.isnan(loss):
+                        print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}!")
+                        print(f"Skipping batch...")
+                        continue
+                    
+                    # Backward pass with gradient scaling
+                    optimizer.zero_grad()
+                    scaler.scale(loss).backward()
+                    
                     # Unscale gradients for clipping
                     scaler.unscale_(optimizer)
                     
@@ -335,13 +335,16 @@ def train_dit(dataset_path: str,
                     # Step optimizer with scaler
                     scaler.step(optimizer)
                     scaler.update()
-                    optimizer.zero_grad()
                     
+                    # Update metrics
+                    running_loss += loss.item()
+                    epoch_loss += loss.item()
+                    valid_batches += 1
                     global_batch_idx += 1
                     
-                    # Log to wandb only when we step
+                    # Log to wandb
                     wandb.log({
-                        'train/loss': loss.item() * gradient_accumulation_steps,
+                        'train/loss': loss.item(),
                         'train/avg_loss': running_loss / valid_batches,
                         'train/learning_rate': optimizer.param_groups[0]['lr'],
                         'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
@@ -352,40 +355,31 @@ def train_dit(dataset_path: str,
                     
                     # Update progress bar
                     pbar.set_postfix({
-                        'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
+                        'loss': f"{loss.item():.4f}",
                         'avg_loss': f"{running_loss / valid_batches:.4f}",
                         'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
-                        'grad_norm': f"{grad_norm:.3f}",
-                        'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
+                        'grad_norm': f"{grad_norm:.3f}"
                     })
-                else:
-                    # Update progress bar without grad norm during accumulation
-                    pbar.set_postfix({
-                        'loss': f"{loss.item() * gradient_accumulation_steps:.4f}",
-                        'avg_loss': f"{running_loss / valid_batches:.4f}",
-                        'lr': f"{optimizer.param_groups[0]['lr']:.2e}",
-                        'accum': f"{(batch_idx + 1) % gradient_accumulation_steps}/{gradient_accumulation_steps}"
-                    })
-                
-                # Check if 15 minutes have elapsed since last checkpoint
-                current_time = time.time()
-                if current_time - last_checkpoint_time >= checkpoint_interval_seconds:
-                    print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
                     
-                    # Save checkpoint
-                    save_model(dit_model, save_dir, epoch + 1, optimizer, global_batch_idx, hyperparams)
-                    
-                    # Generate video sample
-                    if vae_model is not None:
-                        generate_and_log_videos(
-                            dit_model, vae_model, dataset, past_context_length,
-                            max_seq_len, n_patches, latent_dim, device,
-                            log_prefix="generated_video",
-                            step_key="train/global_step",
-                            step_value=global_batch_idx
-                        )
-                    
-                    last_checkpoint_time = current_time
+                    # Check if 15 minutes have elapsed since last checkpoint
+                    current_time = time.time()
+                    if current_time - last_checkpoint_time >= checkpoint_interval_seconds:
+                        print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
+                        
+                        # Save checkpoint
+                        save_model(dit_model, save_dir, epoch + 1, optimizer, global_batch_idx, hyperparams)
+                        
+                        # Generate video sample
+                        if vae_model is not None:
+                            generate_and_log_videos(
+                                dit_model, vae_model, dataset, past_context_length,
+                                max_seq_len, n_patches, latent_dim, device,
+                                log_prefix="generated_video",
+                                step_key="train/global_step",
+                                step_value=global_batch_idx
+                            )
+                        
+                        last_checkpoint_time = current_time
         
         # Calculate epoch averages
         avg_epoch_loss = epoch_loss / valid_batches if valid_batches > 0 else 0.0
@@ -455,8 +449,6 @@ def main():
                        help="Maximum number of frames to load from dataset (None for all)")
     parser.add_argument("--past_context_length", type=int, default=23,
                        help="Past context length")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
-                       help="Number of gradient accumulation steps")
     args = parser.parse_args()
     
     if not os.path.exists(args.dataset_path):
@@ -477,8 +469,7 @@ def main():
         learning_rate=args.learning_rate,
         save_dir=args.save_dir,
         max_frames=args.max_frames,
-        past_context_length=args.past_context_length,
-        gradient_accumulation_steps=args.gradient_accumulation_steps
+        past_context_length=args.past_context_length
     )
 
 

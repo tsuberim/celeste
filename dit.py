@@ -436,38 +436,25 @@ def create_dit(latent_dim: int,
     
     return model
 
-def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor, past_context_length: int):
-    """
-    Vanilla flow matching loss for training DiT model, without special handling of context frames
-    
-    Args:
-        model: DiffusionTransformer model
-        batch: Input sequences (batch_size, seq_len, n_patches, latent_dim)
-        
-    Returns:
-        Flow matching loss
-    """
+def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor):
     batch_size, seq_len = batch.shape[0], batch.shape[1]
-    
-    # Sample noise
-    prior = torch.randn_like(batch)
-    
-    # Sample time uniformly from [0, 1] for each batch item and each frame
     t = torch.rand(batch_size, seq_len, device=batch.device)
-    
-    # Linear interpolation between prior and data (broadcast t correctly)
+    prior = torch.randn_like(batch)
     x_t = (1 - t.view(batch_size, seq_len, 1, 1)) * prior + t.view(batch_size, seq_len, 1, 1) * batch
-    
-    # Predict velocity field
-    v_pred = model(x_t, t)
-    
-    # True velocity is data - noise
+    v_t_pred = model(x_t, t)
     v_target = batch - prior
-    
-    # Simple MSE loss between predicted and target velocities
-    loss = torch.nn.functional.mse_loss(v_pred, v_target)
-    return loss
+    loss = torch.nn.functional.mse_loss(v_t_pred, v_target)
 
+    steps = 1
+    dt = (1 - t) / (steps + 1)
+    for i in range(1, steps + 1):
+        t = t + dt
+        x_t = x_t + v_t_pred*dt.view(batch_size, seq_len, 1, 1)
+        v_t_pred = model(x_t, t)
+        loss_2 = torch.nn.functional.mse_loss(v_t_pred, v_target)
+        loss += loss_2
+
+    return loss
     
 def test_dit():
     """Test the DiT model with dummy data"""
