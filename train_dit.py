@@ -224,7 +224,7 @@ def train_dit(dataset_path: str,
     atexit.register(cleanup_memory)
     
     # Setup optimizer with weight decay for regularization
-    optimizer = optim.AdamW(dit_model.parameters(), lr=learning_rate, weight_decay=0.01)
+    optimizer = optim.Muon(dit_model.parameters(), lr=learning_rate, weight_decay=0.01)
     
     # Setup mixed precision training
     scaler = torch.amp.GradScaler("cuda")
