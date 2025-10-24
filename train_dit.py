@@ -305,6 +305,8 @@ def train_dit(dataset_path: str,
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
         valid_batches = 0
+        self_forcing_loss = 0.0
+        self_forcing_count = 0
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for batch_idx, batch_data in enumerate(pbar):
@@ -315,7 +317,9 @@ def train_dit(dataset_path: str,
                 t = torch.rand(batch_size, seq_len, device=x_1.device)
 
                 self_forcing_percent = 0.2
-                if np.random.rand() < self_forcing_percent:
+                self_force = np.random.rand() < self_forcing_percent
+                if self_force:
+                    self_forcing_count += 1
                     t_mid = torch.rand(batch_size, seq_len, device=t.device)
                     x_mid = interpolate(x_0, x_1, t_mid)
                     # Forward pass with mixed precision
@@ -357,32 +361,56 @@ def train_dit(dataset_path: str,
                 scaler.step(optimizer_adamw)
                 scaler.update()
                 
-                # Update metrics
-                running_loss += loss.item()
-                epoch_loss += loss.item()
-                valid_batches += 1
+                # Update metrics separately for self-forcing vs regular
                 global_batch_idx += 1
                 
+                if self_force:
+                    self_forcing_loss += loss.item()
+                else:
+                    running_loss += loss.item()
+                    epoch_loss += loss.item()
+                    valid_batches += 1
+                
                 # Log to wandb
-                wandb.log({
-                    'train/loss': loss.item(),
-                    'train/avg_loss': running_loss / valid_batches,
+                log_dict = {
                     'train/learning_rate_muon': optimizer_muon.param_groups[0]['lr'],
                     'train/learning_rate_adamw': optimizer_adamw.param_groups[0]['lr'],
                     'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                     'train/grad_scaler_scale': scaler.get_scale(),
                     'train/epoch': epoch,
                     'train/global_step': global_batch_idx
-                })
+                }
+                
+                # Log separately for self-forcing vs regular
+                if self_force:
+                    log_dict['train/loss_self_forcing'] = loss.item()
+                    log_dict['train/avg_loss_self_forcing'] = self_forcing_loss / self_forcing_count
+                else:
+                    log_dict['train/loss'] = loss.item()
+                    if valid_batches > 0:
+                        log_dict['train/avg_loss'] = running_loss / valid_batches
+                
+                # Log ratio
+                total_batches = valid_batches + self_forcing_count
+                if total_batches > 0:
+                    log_dict['train/self_forcing_ratio'] = self_forcing_count / total_batches
+                
+                wandb.log(log_dict)
                 
                 # Update progress bar
-                pbar.set_postfix({
+                pbar_dict = {
                     'loss': f"{loss.item():.4f}",
-                    'avg_loss': f"{running_loss / valid_batches:.4f}",
                     'lr_muon': f"{optimizer_muon.param_groups[0]['lr']:.2e}",
                     'lr_adamw': f"{optimizer_adamw.param_groups[0]['lr']:.2e}",
                     'grad_norm': f"{grad_norm:.3f}"
-                })
+                }
+                
+                if self_force:
+                    pbar_dict['sf_avg'] = f"{self_forcing_loss / self_forcing_count:.4f}"
+                elif valid_batches > 0:
+                    pbar_dict['avg_loss'] = f"{running_loss / valid_batches:.4f}"
+                
+                pbar.set_postfix(pbar_dict)
                 
                 # Check if 15 minutes have elapsed since last checkpoint
                 current_time = time.time()
