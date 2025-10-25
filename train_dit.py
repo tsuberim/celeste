@@ -360,10 +360,12 @@ def train_dit(dataset_path: str,
                             v_t_mid_pred, prev_acts_logits_old, next_acts_logits, _ = dit_model(x_mid, t_mid, acts)
                             # Sample from logits instead of argmax
                             # Reshape for multinomial: (batch_size, seq_len, num_codes) -> (batch_size*seq_len, num_codes)
+                            print(f"prev_acts_logits_old shape: {prev_acts_logits_old.shape}")
                             prev_acts_indices = torch.multinomial(
-                                torch.nn.functional.softmax(prev_acts_logits_old.reshape(-1, prev_acts_logits_old.shape[-1]), dim=-1),
+                                torch.nn.functional.softmax(prev_acts_logits_old, dim=-1).view(-1, prev_acts_logits_old.shape[-1]),
                                 num_samples=1
-                            ).squeeze(-1).reshape(batch_size, seq_len)
+                            ).reshape(batch_size, seq_len)
+                            print(f"prev_acts_indices shape: {prev_acts_indices.shape}")
                             x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
                             prev_acts_logits_old = prev_acts_logits_old.detach()
                     x_0 = x_0.detach()
