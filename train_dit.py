@@ -68,7 +68,7 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
     if optimizer_adamw is not None:
         training_state['optimizer_state_dict_adamw'] = optimizer_adamw.state_dict()
     if sampler_weights is not None:
-        training_state['sample_grad_ema'] = sampler_weights
+        training_state['sample_grad_ema'] = sampler_weights.float()
     
     # Save training state with same naming convention
     training_filename = filename.replace('.safetensors', '_training_state.pt')
