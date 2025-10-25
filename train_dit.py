@@ -15,7 +15,7 @@ import time
 import math
 
 from encoded_dataset import EncodedDataset
-from dit import create_dit, DiffusionTransformer, flow_matching_loss
+from dit import create_dit, DiffusionTransformer
 from utils import get_device
 from vae2 import VAE2
 from generate import generate_and_save_video
@@ -135,6 +135,7 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
             vae_model.train()
             
     except Exception as e:
+        raise e
         print(f"Failed to generate video sample: {e}")
         # Ensure we restore train mode even on error
         dit_model.train()
@@ -343,14 +344,22 @@ def train_dit(dataset_path: str,
                 batch_size, seq_len = x_1.shape[0], x_1.shape[1]
                 t = torch.rand(batch_size, seq_len, device=x_1.device)
 
-                self_forcing_percent = 0.2
+                self_forcing_percent = 0.3
                 self_force = False
+                prev_acts_indices = None
                 while np.random.rand() < self_forcing_percent:
                     t_mid = torch.rand(batch_size, seq_len, device=t.device)
                     x_mid = interpolate(x_0, x_1, t_mid)
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):
-                            v_t_mid_pred = dit_model(x_mid, t_mid)
+                            acts = torch.cat([prev_acts_indices[:, 1:], torch.zeros_like(prev_acts_indices[:, :1])], dim=1) if prev_acts_indices is not None else None
+                            v_t_mid_pred, prev_acts_logits, next_acts_logits, _ = dit_model(x_mid, t_mid, acts)
+                            # Sample from logits instead of argmax
+                            # Reshape for multinomial: (batch_size, seq_len, num_codes) -> (batch_size*seq_len, num_codes)
+                            prev_acts_indices = torch.multinomial(
+                                torch.nn.functional.softmax(prev_acts_logits.reshape(-1, prev_acts_logits.shape[-1]), dim=-1),
+                                num_samples=1
+                            ).squeeze(-1).reshape(batch_size, seq_len)
                             x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
                     x_0 = x_0.detach()
                     self_force = True
@@ -363,9 +372,42 @@ def train_dit(dataset_path: str,
                 
                 # Forward pass with mixed precision
                 with torch.amp.autocast("cuda"):
-                    v_t_pred = dit_model(x_t, t)
-                    loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
-                
+                    acts = torch.cat([prev_acts_indices[:, 1:], torch.zeros_like(prev_acts_indices[:, :1])], dim=1) if prev_acts_indices is not None else None
+                    v_t_pred, prev_acts_logits, next_acts_logits, vq_loss = dit_model(x_t, t, acts)
+                    
+                    # Flow matching loss
+                    fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
+                    loss = fm_loss
+                    
+                    # Add VQ loss
+                    loss = loss + vq_loss
+
+                    # Action prediction losses
+                    prev_action_loss = None
+                    next_action_loss = None
+                    if acts is not None:
+                        # Previous action loss: predict action at t from frame at t
+                        prev_acts_target = acts[:, :-1]
+                        prev_acts_logits_for_loss = prev_acts_logits[:, 1:]
+                        prev_action_loss = torch.nn.functional.cross_entropy(
+                            prev_acts_logits_for_loss.reshape(-1, prev_acts_logits_for_loss.shape[-1]), 
+                            prev_acts_target.reshape(-1)
+                        )
+                        loss = loss + prev_action_loss
+                        
+                        # Next action loss: predict action at t+1 from frame at t
+                        next_acts_target = prev_acts_logits[:, 1:]
+                        next_acts_logits_for_loss = next_acts_logits[:, :-1]
+                        # KL divergence between predicted next action logits and target logits
+                        next_acts_logits_flat = next_acts_logits_for_loss.reshape(-1, next_acts_logits_for_loss.shape[-1])
+                        next_acts_target_flat = next_acts_target.reshape(-1, next_acts_target.shape[-1])
+                        next_action_loss = torch.nn.functional.kl_div(
+                            torch.nn.functional.log_softmax(next_acts_logits_flat, dim=-1),
+                            torch.nn.functional.softmax(next_acts_target_flat, dim=-1),
+                            reduction='batchmean'
+                        )
+                        loss = loss + next_action_loss
+                    
                 # Check for NaN loss
                 if torch.isnan(loss):
                     print(f"NaN loss detected at epoch {epoch}, batch {batch_idx}!")
@@ -414,15 +456,23 @@ def train_dit(dataset_path: str,
                     'train/grad_norm': grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                     'train/grad_scaler_scale': scaler.get_scale(),
                     'train/epoch': epoch,
-                    'train/global_step': global_batch_idx
+                    'train/global_step': global_batch_idx,
+                    'train/vq_loss': vq_loss.item(),
+                    'train/loss': loss.item(),
                 }
+                
+                # Log action losses if available
+                if prev_action_loss is not None:
+                    log_dict['train/prev_action_loss'] = prev_action_loss.item()
+                if next_action_loss is not None:
+                    log_dict['train/next_action_loss'] = next_action_loss.item()
                 
                 # Log separately for self-forcing vs regular
                 if self_force:
                     log_dict['train/loss_self_forcing'] = loss.item()
                     log_dict['train/avg_loss_self_forcing'] = self_forcing_loss / self_forcing_count
                 else:
-                    log_dict['train/loss'] = loss.item()
+                    log_dict['train/fm_loss'] = loss.item()
                     if valid_batches > 0:
                         log_dict['train/avg_loss'] = running_loss / valid_batches
                 

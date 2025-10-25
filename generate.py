@@ -26,66 +26,32 @@ class ODEFlowSolver:
     def __init__(self, dit_model: DiffusionTransformer):
         self.dit_model = dit_model
     
-    def solve_ode(self, gen_frames: torch.Tensor, future_frames: torch.Tensor) -> (torch.Tensor, torch.Tensor):
-        """
-        Solve ODE from t=0 (noise) to t=1 (clean frame)
-        
-        Args:
-            context: Context frames (seq_len, n_patches, latent_dim)
-            num_steps: Number of integration steps
-            
-        Returns:
-            Generated frame (n_patches, latent_dim)
-        """
+    def solve_ode(self, gen_frames: torch.Tensor, gen_actions: torch.Tensor, future_frames: torch.Tensor) -> (torch.Tensor, torch.Tensor):
         batch_size, seq_len, n_patches, latent_dim = gen_frames.shape
 
         # Define ODE function for scipy
         def ode_func(t_scalar, x_flat):
             f_frames = x_flat
             batch = torch.cat([gen_frames, f_frames], dim=1)
+            acts = torch.cat([gen_actions, torch.zeros_like(gen_actions[:, :1])], dim=1)
             # Create per-frame time values: (batch_size, total_seq_len)
             total_seq_len = batch.shape[1]
             t = torch.full((batch_size, total_seq_len), .95, device=batch.device)
             t[:, gen_frames.shape[1]:] = t_scalar
-            velocity = self.dit_model(batch, t)[:, gen_frames.shape[1]:]
-            return velocity
+            velocity, _, next_acts_logits, _ = self.dit_model(batch, t, acts)
+            return velocity[:, gen_frames.shape[1]:], next_acts_logits[:, gen_frames.shape[1]:]
         
 
-        t_span = (0, 1)
-        t_eval = np.array([1.0])  # Only need final result
-        # Solve ODE using scipy
-        # solution = solve_ivp(
-        #     fun=ode_func,
-        #     y0=future_frames.flatten().cpu().numpy(),
-        #     t_span=t_span,
-        #     method='DOP853',  # Dormand-Prince 8(5,3)
-        #     t_eval=t_eval,
-        #     rtol=1e-1,
-        #     atol=1e-2,
-        # )
         def euler_solve_mps(x0, steps):
             x = x0
             dt = 1.0 / steps
             for i in range(steps):
                 t = i * dt#, torch.tensor([i * dt], device=x.device)
-                v = ode_func(t, x)
+                v, next_acts_logits = ode_func(t, x)
                 x = x + v * dt
-            return x
+            return x, next_acts_logits
 
-        def rk4_solve(x0, steps):
-            """A more stable RK4 solver."""
-            x = x0
-            dt = 1.0 / steps
-            for i in range(steps):
-                t = i * dt
-                k1 = ode_func(t, x)
-                k2 = ode_func(t + 0.5 * dt, x + 0.5 * dt * k1)
-                k3 = ode_func(t + 0.5 * dt, x + 0.5 * dt * k2)
-                k4 = ode_func(t + dt, x + dt * k3)
-                x = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-            return x
-
-        final_state = euler_solve_mps(future_frames, steps=10)
+        final_state, next_acts_logits = euler_solve_mps(future_frames, steps=10)
         
         # Get final state and reshape
         # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
@@ -93,8 +59,24 @@ class ODEFlowSolver:
         
         gen_frame = f_frames[:, 0]
         new_f_frame = torch.randn_like(gen_frame).unsqueeze(1)
-        return gen_frame, torch.cat([f_frames[:, 1:], new_f_frame], dim=1)
+        next_acts_softmax = torch.nn.functional.softmax(next_acts_logits, dim=-1)
+        next_acts_indices = torch.multinomial(next_acts_softmax.reshape(-1, next_acts_softmax.shape[-1]), num_samples=1).reshape(batch_size, future_frames.shape[1])
+        return gen_frame, torch.cat([f_frames[:, 1:], new_f_frame], dim=1), next_acts_indices
 
+def actions_from_frames(dit_model, gen_frames, device):
+    B, S = gen_frames.shape[0], gen_frames.shape[1]
+    t = torch.full((B, S), 1.0, device=device)
+    print(f'predicting previous actions...')
+    _, prev_acts_logits, next_acts_logits, _ = dit_model(gen_frames, t)
+    prev_acts_softmax = torch.nn.functional.softmax(prev_acts_logits, dim=-1)
+    prev_acts = torch.multinomial(prev_acts_softmax.reshape(-1, prev_acts_softmax.shape[-1]), num_samples=1).reshape(B, S)
+    acts = torch.cat([prev_acts[:, 1:], torch.zeros_like(prev_acts[:, :1])], dim=1)
+    print(f'predicting current actions...')
+    _, _, next_acts_logits, _ = dit_model(gen_frames, t, acts)
+    next_acts_softmax = torch.nn.functional.softmax(next_acts_logits, dim=-1)
+    next_acts = torch.multinomial(next_acts_softmax.reshape(-1, next_acts_softmax.shape[-1]), num_samples=1).reshape(B, S)
+    gen_actions = next_acts
+    return gen_actions
 
 def generate_video_autoregressive(dit_model: DiffusionTransformer,
                                  vae_model,
@@ -137,6 +119,9 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
     if prompt_sequences is not None:
         print(f"Using provided prompt sequences: {prompt_sequences.shape}")
         gen_frames = prompt_sequences.to(device)
+        B, S = prompt_sequences.shape[0], prompt_sequences.shape[1]
+
+        gen_actions = actions_from_frames(dit_model, gen_frames, device)
     # Load prompt frames from video or use random
     elif prompt_video_path and os.path.exists(prompt_video_path):
         print(f"Loading prompt from video: {prompt_video_path}")
@@ -162,11 +147,12 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
             from vae2 import reparameterize
             encoded = reparameterize(mu, logvar)  # (batch_size * seq_len, n_patches, latent_dim)
             gen_frames = encoded.reshape(B, S, n_patches, latent_dim)  # (batch_size, seq_len, n_patches, latent_dim)
-        
+        gen_actions = actions_from_frames(dit_model, gen_frames, device)
         print(f"Encoded prompt frames: {gen_frames.shape}")
     else:
         print("Using random prompt frames")
         gen_frames = torch.randn(batch_size, past_context_length, n_patches, latent_dim, device=device)
+        gen_actions = torch.randint(0, 8, (batch_size, past_context_length), device=device)
     
     future_frames_prior = torch.randn(batch_size, max_seq_len-past_context_length, n_patches, latent_dim, device=device)
     last_gen_frame = gen_frames[:, -1]  # (batch_size, n_patches, latent_dim)
@@ -179,25 +165,32 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
     future_frames = noise_weight * last_gen_frame_repeated + (1 - noise_weight) * future_frames_prior
 
     print(f"Initial gen_frames: {gen_frames.shape}")
+    print(f"Initial gen_actions: {gen_actions.shape}")
     print(f"Initial future_frames: {future_frames.shape}")
 
     out_frames = gen_frames
+    out_actions = gen_actions
 
-    def add_frame(frame: torch.Tensor):
+    def add_frame(frame: torch.Tensor, acts_indices: torch.Tensor):
         nonlocal gen_frames
+        nonlocal gen_actions
         nonlocal out_frames
+        nonlocal out_actions
         gen_frames = torch.cat([gen_frames, frame.unsqueeze(1)], dim=1)
+        gen_actions = torch.cat([gen_actions, acts_indices], dim=1)
         out_frames = torch.cat([out_frames, frame.unsqueeze(1)], dim=1)
+        out_actions = torch.cat([out_actions, acts_indices], dim=1)
         if gen_frames.shape[1] >= past_context_length:
             gen_frames = gen_frames[:, 1:]
-        return gen_frames
+            gen_actions = gen_actions[:, 1:]
+        return gen_frames, gen_actions
 
     with torch.no_grad():
         for _ in tqdm(range(max_frames), desc="Generating frames"):
-            new_frame, future_frames = ode_solver.solve_ode(gen_frames, future_frames)
-            add_frame(new_frame)
+            new_frame, future_frames, next_acts_indices = ode_solver.solve_ode(gen_frames, gen_actions, future_frames)
+            add_frame(new_frame, next_acts_indices)
 
-    return out_frames
+    return out_frames, out_actions
 
 
 def decode_frames_with_vae(encoded_frames: torch.Tensor,
@@ -393,7 +386,7 @@ def main():
     print("VAE model loaded successfully")
     
     # Generate encoded frames for multiple videos
-    encoded_frames = generate_video_autoregressive(
+    encoded_frames, acts = generate_video_autoregressive(
         dit_model=dit_model,
         vae_model=vae_model,
         max_frames=args.max_frames,
@@ -477,7 +470,7 @@ def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: i
         device = get_device()
     
     # Generate frames for multiple videos
-    encoded_frames = generate_video_autoregressive(
+    encoded_frames, acts = generate_video_autoregressive(
         dit_model=dit_model,
         vae_model=vae_model,
         max_frames=num_frames,

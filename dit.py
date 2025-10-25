@@ -31,6 +31,64 @@ class RMSNorm(nn.Module):
         return self.weight * x_norm
 
 
+class VectorQuantizer(nn.Module):
+    """Vector Quantizer for discretizing actions into 8 codes"""
+    
+    def __init__(self, num_codes: int = 8, code_dim: int = 256):
+        super().__init__()
+        self.num_codes = num_codes
+        self.code_dim = code_dim
+        
+        # Learnable codebook
+        self.codebook = nn.Embedding(num_codes, code_dim)
+        nn.init.uniform_(self.codebook.weight, -1.0 / num_codes, 1.0 / num_codes)
+    
+    def forward(self, x: Tensor, compute_loss: bool = False) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+        """
+        Args:
+            x: Input tensor (..., code_dim)
+            compute_loss: Whether to compute VQ loss
+        
+        Returns:
+            quantized: Quantized tensor with same shape as x
+            indices: Codebook indices (...,)
+            vq_loss: VQ loss (commitment + codebook) if compute_loss=True, else None
+        """
+        # Flatten input for distance computation
+        input_shape = x.shape
+        flat_x = x.reshape(-1, self.code_dim)
+        
+        # Calculate distances to codebook vectors
+        distances = (
+            torch.sum(flat_x ** 2, dim=1, keepdim=True) +
+            torch.sum(self.codebook.weight ** 2, dim=1) -
+            2 * torch.matmul(flat_x, self.codebook.weight.t())
+        )
+        
+        # Get nearest codebook indices
+        indices = torch.argmin(distances, dim=1)
+        
+        # Quantize
+        quantized_flat = self.codebook(indices)
+        quantized = quantized_flat.reshape(input_shape)
+        
+        # Compute VQ loss if requested
+        vq_loss = None
+        if compute_loss:
+            # Commitment loss: ||sg[z_e] - e||^2
+            commitment_loss = F.mse_loss(quantized.detach(), x)
+            # Codebook loss: ||z_e - sg[e]||^2
+            codebook_loss = F.mse_loss(quantized, x.detach())
+            vq_loss = codebook_loss + 0.25 * commitment_loss
+        
+        # Straight-through estimator
+        quantized = x + (quantized - x).detach()
+        
+        indices = indices.reshape(input_shape[:-1])
+        
+        return quantized, indices, vq_loss
+
+
 class MultiHeadAttentionWithRoPE(nn.Module):
     """Multi-head spatio-temporal attention with rotary positional embeddings using torchtune's RoPE"""
     
@@ -204,40 +262,53 @@ class DiTBlock(nn.Module):
         self.ff = FeedForward(embed_dim, ff_dim, dropout)
         
         # FiLM: Feature-wise Linear Modulation for time conditioning
-        # Predict scale and shift parameters for each normalization layer
-        self.film_mlp = nn.Sequential(
+        self.time_film_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim * 4)  # 2 * embed_dim for each of 2 norms
+        )
+        
+        # FiLM: Feature-wise Linear Modulation for action conditioning
+        self.action_film_mlp = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 4),
             nn.SiLU(),
             nn.Linear(embed_dim * 4, embed_dim * 4)  # 2 * embed_dim for each of 2 norms
         )
     
-    def forward(self, x: Tensor, t_emb: Tensor, use_causal: bool = False) -> Tensor:
+    def forward(self, x: Tensor, t_emb: Tensor, action_emb: Optional[Tensor] = None, use_causal: bool = False) -> Tensor:
         """
-        Forward pass with FiLM time conditioning
+        Forward pass with FiLM conditioning from time and actions
         
         Args:
             x: Input tensor (batch_size, seq_len, embed_dim)
             t_emb: Time embeddings (batch_size, seq_len, embed_dim) - per-patch time embeddings
+            action_emb: Action embeddings (batch_size, seq_len, embed_dim) - optional per-patch action embeddings
             use_causal: Whether to use causal masking
             
         Returns:
             Output tensor (batch_size, seq_len, embed_dim)
         """
-        # Get FiLM parameters from time embedding (per-patch)
-        film_params = self.film_mlp(t_emb)  # (batch_size, seq_len, embed_dim * 4)
-        scale1, shift1, scale2, shift2 = film_params.chunk(4, dim=-1)  # Each: (batch_size, seq_len, embed_dim)
+        # Get FiLM parameters from time embedding
+        time_film_params = self.time_film_mlp(t_emb)  # (batch_size, seq_len, embed_dim * 4)
+        t_scale1, t_shift1, t_scale2, t_shift2 = time_film_params.chunk(4, dim=-1)
         
-        # No need to unsqueeze - already has the right shape for element-wise operations
+        # Get FiLM parameters from action embedding if provided
+        if action_emb is not None:
+            action_film_params = self.action_film_mlp(action_emb)  # (batch_size, seq_len, embed_dim * 4)
+            a_scale1, a_shift1, a_scale2, a_shift2 = action_film_params.chunk(4, dim=-1)
+        else:
+            # No action conditioning, use zeros
+            a_scale1 = a_shift1 = a_scale2 = a_shift2 = 0
         
-        # Attention block with FiLM conditioning
+        # Attention block with FiLM conditioning from both time and action
         h1 = self.norm1(x)
-        h1 = h1 * (1 + scale1) + shift1  # FiLM modulation (element-wise)
+        h1 = h1 * (1 + t_scale1 + a_scale1) + (t_shift1 + a_shift1)
         h1 = self.attn(h1, use_causal)
         x = x + h1
         
-        # Feed-forward block with FiLM conditioning
+        # Feed-forward block with FiLM conditioning from both time and action
         h2 = self.norm2(x)
-        h2 = h2 * (1 + scale2) + shift2  # FiLM modulation (element-wise)
+        h2 = h2 * (1 + t_scale2 + a_scale2) + (t_shift2 + a_shift2)
         h2 = self.ff(h2)
         x = x + h2
         
@@ -258,7 +329,9 @@ class DiffusionTransformer(nn.Module):
                  num_heads: int = 8,
                  ff_dim: int = 2048,
                  max_seq_len: int = 24,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1,
+                 action_dim: int = 16,
+                 num_action_codes: int = 8):
         """
         Args:
             latent_dim: Dimension of latent space per patch
@@ -269,6 +342,8 @@ class DiffusionTransformer(nn.Module):
             ff_dim: Feed-forward hidden dimension
             max_seq_len: Maximum sequence length
             dropout: Dropout rate
+            action_dim: Dimension of latent action space
+            num_action_codes: Number of VQ codes for actions
         """
         super().__init__()
         
@@ -276,6 +351,8 @@ class DiffusionTransformer(nn.Module):
         self.n_patches = n_patches
         self.embed_dim = embed_dim
         self.max_seq_len = max_seq_len
+        self.action_dim = action_dim
+        self.num_action_codes = num_action_codes
         
         # Input projection: project each patch to embed_dim
         self.input_proj = nn.Linear(latent_dim, embed_dim)
@@ -288,14 +365,59 @@ class DiffusionTransformer(nn.Module):
             nn.Linear(embed_dim, embed_dim)
         )
         
+        # Vector quantizer for actions (shared codebook for input and output)
+        self.action_vq = VectorQuantizer(num_codes=num_action_codes, code_dim=action_dim)
+        
+        # Action conditioning: project codebook embeddings to model dimension
+        self.action_mlp = nn.Sequential(
+            nn.Linear(action_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        
+        # Encoder: project frame deltas from latent_dim to action_dim for ground truth
+        self.action_encoder = nn.Linear(latent_dim, action_dim)
+        
+        # Learnable action tokens (like CLS tokens in ViT)
+        self.prev_action_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+        self.next_action_token = nn.Parameter(torch.randn(1, 1, embed_dim))
+        
         # Transformer blocks
         self.blocks = nn.ModuleList([
-            DiTBlock(embed_dim, num_heads, ff_dim, dropout, max_seq_len, n_patches, max_seq_len)
+            DiTBlock(embed_dim, num_heads, ff_dim, dropout, max_seq_len, n_patches + 2, max_seq_len)  # +2 for prev and next action tokens
             for _ in range(num_layers)
         ])
         
-        # Output projection: back to latent space (per patch)
+        # Output projection: back to latent space (per patch, not for action token)
         self.output_proj = nn.Linear(embed_dim, latent_dim)
+        
+        # Previous action prediction head: predict previous actions from action token
+        self.prev_action_pred_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, action_dim)
+        )
+        
+        # Previous action logits head: converts quantized actions to logits
+        self.prev_action_logits_mlp = nn.Sequential(
+            nn.Linear(action_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, num_action_codes)
+        )
+        
+        # Next action prediction head: predict next actions from action token
+        self.next_action_pred_mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, action_dim)
+        )
+        
+        # Next action logits head: converts quantized actions to logits
+        self.next_action_logits_mlp = nn.Sequential(
+            nn.Linear(action_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, num_action_codes)
+        )
         
         # Final RMS norm
         self.norm = RMSNorm(embed_dim)
@@ -354,17 +476,22 @@ class DiffusionTransformer(nn.Module):
             
         return emb
     
-    def forward(self, x: Tensor, t: Tensor, use_causal_mask: bool = True):
+    def forward(self, x: Tensor, t: Tensor, actions: Optional[Tensor] = None, use_causal_mask: bool = True):
         """
         Forward pass for sequence prediction
         
         Args:
             x: Input sequence (batch_size, seq_len, n_patches, latent_dim)
             t: Time parameter (batch_size, seq_len) for flow matching - per-frame time values
+            actions: Action indices (batch_size, seq_len) - discrete action codes [0, num_action_codes)
             use_causal_mask: Whether to use causal masking for autoregressive prediction
             
         Returns:
-            Predicted velocity field (batch_size, seq_len, n_patches, latent_dim)
+            Tuple of (velocity_field, prev_action_logits, next_action_logits, vq_loss)
+            - velocity_field: (batch_size, seq_len, n_patches, latent_dim)
+            - prev_action_logits: (batch_size, seq_len, num_codes) - logits for previous action prediction
+            - next_action_logits: (batch_size, seq_len, num_codes) - logits for next action prediction
+            - vq_loss: VQ loss (commitment + codebook) - includes both prev and next
         """
         batch_size, seq_len, n_patches, latent_dim = x.shape
         
@@ -377,8 +504,14 @@ class DiffusionTransformer(nn.Module):
         # Reshape to have per-frame embeddings and broadcast across patches
         # (batch_size * seq_len, embed_dim) -> (batch_size, seq_len, embed_dim) -> (batch_size, seq_len * n_patches, embed_dim)
         t_emb = t_emb.reshape(batch_size, seq_len, self.embed_dim)
-        t_emb = t_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches, self.embed_dim)
-        t_emb = t_emb.reshape(batch_size, seq_len * n_patches, self.embed_dim)
+        
+        # Get action embeddings if provided (using shared VQ codebook)
+        if actions is not None:
+            # actions: (batch_size, seq_len) - discrete indices
+            action_emb = self.action_vq.codebook(actions)  # (batch_size, seq_len, action_dim)
+            action_emb = self.action_mlp(action_emb)  # (batch_size, seq_len, embed_dim)
+        else:
+            action_emb = None
         
         # Flatten spatial and temporal dimensions: (batch_size, seq_len * n_patches, latent_dim)
         x_flat = x.reshape(batch_size, seq_len * n_patches, latent_dim)
@@ -386,20 +519,77 @@ class DiffusionTransformer(nn.Module):
         # Project each patch to embedding space
         x_emb = self.input_proj(x_flat)  # (batch_size, seq_len * n_patches, embed_dim)
         
-        # Apply transformer blocks with per-patch time conditioning
+        # Reshape to (batch_size, seq_len, n_patches, embed_dim) to insert action tokens
+        x_emb = x_emb.reshape(batch_size, seq_len, n_patches, self.embed_dim)
+        
+        # Add action tokens to each frame
+        # prev_action_token: (1, 1, embed_dim) -> expand to (batch_size, seq_len, 1, embed_dim)
+        # next_action_token: (1, 1, embed_dim) -> expand to (batch_size, seq_len, 1, embed_dim)
+        prev_action_tokens = self.prev_action_token.expand(batch_size, seq_len, 1, self.embed_dim)
+        next_action_tokens = self.next_action_token.expand(batch_size, seq_len, 1, self.embed_dim)
+        
+        # Concatenate patches with action tokens: (batch_size, seq_len, n_patches + 2, embed_dim)
+        x_emb = torch.cat([x_emb, prev_action_tokens, next_action_tokens], dim=2)
+        
+        # Flatten back: (batch_size, seq_len * (n_patches + 2), embed_dim)
+        x_emb = x_emb.reshape(batch_size, seq_len * (n_patches + 2), self.embed_dim)
+        
+        # Broadcast time embeddings across patches + action tokens
+        t_emb_broadcast = t_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches + 2, self.embed_dim)
+        t_emb_broadcast = t_emb_broadcast.reshape(batch_size, seq_len * (n_patches + 2), self.embed_dim)
+        
+        # Broadcast action embeddings across patches + action tokens if provided
+        if action_emb is not None:
+            action_emb_broadcast = action_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches + 2, self.embed_dim)
+            action_emb_broadcast = action_emb_broadcast.reshape(batch_size, seq_len * (n_patches + 2), self.embed_dim)
+        else:
+            action_emb_broadcast = None
+        
+        # Apply transformer blocks with separate time and action conditioning
         for block in self.blocks:
-            x_emb = block(x_emb, t_emb, use_causal_mask)
+            x_emb = block(x_emb, t_emb_broadcast, action_emb_broadcast, use_causal_mask)
         
         # Layer norm (let's try to remove this)
         # x_emb = self.norm(x_emb)
         
-        # Project back to latent space for all patches
-        output = self.output_proj(x_emb)  # (batch_size, seq_len * n_patches, latent_dim)
+        # Reshape to separate patches and action tokens
+        # (batch_size, seq_len * (n_patches + 2), embed_dim) -> (batch_size, seq_len, n_patches + 2, embed_dim)
+        x_emb = x_emb.reshape(batch_size, seq_len, n_patches + 2, self.embed_dim)
+        
+        # Split into regular patches and action tokens
+        x_patches = x_emb[:, :, :n_patches, :]  # (batch_size, seq_len, n_patches, embed_dim)
+        prev_action_token_embs = x_emb[:, :, n_patches, :]  # (batch_size, seq_len, embed_dim)
+        next_action_token_embs = x_emb[:, :, n_patches + 1, :]  # (batch_size, seq_len, embed_dim)
+        
+        # Project patches back to latent space
+        x_patches_flat = x_patches.reshape(batch_size, seq_len * n_patches, self.embed_dim)
+        output = self.output_proj(x_patches_flat)  # (batch_size, seq_len * n_patches, latent_dim)
         
         # Reshape back to (batch_size, seq_len, n_patches, latent_dim)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
         
-        return output
+        # Predict previous actions from prev action token embeddings
+        prev_actions_continuous = self.prev_action_pred_mlp(prev_action_token_embs)  # (batch_size, seq_len, action_dim)
+        
+        # Quantize previous actions to discrete codes (always compute VQ loss)
+        prev_actions_quantized, _, prev_vq_loss = self.action_vq(prev_actions_continuous, compute_loss=True)
+        
+        # Convert quantized previous actions to logits
+        prev_logits = self.prev_action_logits_mlp(prev_actions_quantized)  # (batch_size, seq_len, num_action_codes)
+        
+        # Predict next actions from next action token embeddings
+        next_actions_continuous = self.next_action_pred_mlp(next_action_token_embs)  # (batch_size, seq_len, action_dim)
+        
+        # Quantize next actions to discrete codes (always compute VQ loss)
+        next_actions_quantized, _, next_vq_loss = self.action_vq(next_actions_continuous, compute_loss=True)
+        
+        # Convert quantized next actions to logits
+        next_logits = self.next_action_logits_mlp(next_actions_quantized)  # (batch_size, seq_len, num_action_codes)
+        
+        # Combine VQ losses
+        vq_loss = prev_vq_loss + next_vq_loss
+        
+        return output, prev_logits, next_logits, vq_loss
     
 
 
@@ -408,7 +598,9 @@ def create_dit(latent_dim: int,
                embed_dim: int = 768,
                num_layers: int = 12,
                num_heads: int = 8,
-               max_seq_len: int = 24) -> DiffusionTransformer:
+               max_seq_len: int = 24,
+               action_dim: int = 16,
+               num_action_codes: int = 8) -> DiffusionTransformer:
     """
     Create a Diffusion Transformer model
     
@@ -419,6 +611,8 @@ def create_dit(latent_dim: int,
         num_layers: Number of transformer layers
         num_heads: Number of attention heads
         max_seq_len: Maximum sequence length
+        action_dim: Dimension of latent action space
+        num_action_codes: Number of VQ codes for actions
         
     Returns:
         DiffusionTransformer model
@@ -431,30 +625,12 @@ def create_dit(latent_dim: int,
         num_heads=num_heads,
         ff_dim=embed_dim * 4,  # Standard 4x expansion
         max_seq_len=max_seq_len,
-        dropout=0.1
+        dropout=0.1,
+        action_dim=action_dim,
+        num_action_codes=num_action_codes
     )
     
     return model
-
-def flow_matching_loss(model: DiffusionTransformer, batch: torch.Tensor):
-    batch_size, seq_len = batch.shape[0], batch.shape[1]
-    t = torch.rand(batch_size, seq_len, device=batch.device)
-    prior = torch.randn_like(batch)
-    x_t = (1 - t.view(batch_size, seq_len, 1, 1)) * prior + t.view(batch_size, seq_len, 1, 1) * batch
-    v_t_pred = model(x_t, t)
-    v_target = batch - prior
-    loss = torch.nn.functional.mse_loss(v_t_pred, v_target)
-
-    steps = 1
-    dt = (1 - t) / (steps + 1)
-    for i in range(1, steps + 1):
-        t = t + dt
-        x_t = x_t + v_t_pred*dt.view(batch_size, seq_len, 1, 1)
-        v_t_pred = model(x_t, t)
-        loss_2 = torch.nn.functional.mse_loss(v_t_pred, v_target)
-        loss += loss_2
-
-    return loss
     
 def test_dit():
     """Test the DiT model with dummy data"""
@@ -483,15 +659,22 @@ def test_dit():
     print(f"Input shape: {x.shape}")
     print(f"Time shape: {t.shape}")
     
-    # Forward pass with time conditioning
-    output = dit(x, t)
+    # Forward pass with time conditioning (no actions)
+    output, prev_action_logits, next_action_logits, vq_loss = dit(x, t)
     print(f"Output shape: {output.shape}")
     print(f"Expected output shape: ({batch_size}, {seq_len}, {n_patches}, {latent_dim})")
+    print(f"Previous action logits shape: {prev_action_logits.shape}")
+    print(f"Next action logits shape: {next_action_logits.shape}")
+    print(f"Expected action logits shape: ({batch_size}, {seq_len}, 8)")
+    print(f"VQ loss: {vq_loss.item():.6f}")
     
-    # Test flow matching loss
-    print("\nTesting flow matching loss...")
-    loss = flow_matching_loss(dit, x)
-    print(f"Flow matching loss: {loss.item():.6f}")
+    # Forward pass with action conditioning
+    print("\nTesting with action conditioning...")
+    actions = torch.randint(0, 8, (batch_size, seq_len))
+    output_cond, prev_logits_cond, next_logits_cond, _ = dit(x, t, actions)
+    print(f"Output with actions shape: {output_cond.shape}")
+    print(f"Previous action logits with conditioning shape: {prev_logits_cond.shape}")
+    print(f"Next action logits with conditioning shape: {next_logits_cond.shape}")
     
     # Test RoPE
     print("\nTesting TorchTune RoPE implementation...")
