@@ -357,17 +357,15 @@ def train_dit(dataset_path: str,
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):
                             acts = torch.cat([prev_acts_indices[:, 1:], torch.zeros_like(prev_acts_indices[:, :1])], dim=1) if prev_acts_indices is not None else None
-                            v_t_mid_pred, prev_acts_logits_old, next_acts_logits, _ = dit_model(x_mid, t_mid, acts)
+                            v_t_mid_pred, prev_acts_logits, next_acts_logits, _ = dit_model(x_mid, t_mid, acts)
                             # Sample from logits instead of argmax
                             # Reshape for multinomial: (batch_size, seq_len, num_codes) -> (batch_size*seq_len, num_codes)
-                            print(f"prev_acts_logits_old shape: {prev_acts_logits_old.shape}")
                             prev_acts_indices = torch.multinomial(
-                                torch.nn.functional.softmax(prev_acts_logits_old, dim=-1).view(-1, prev_acts_logits_old.shape[-1]),
+                                torch.nn.functional.softmax(prev_acts_logits, dim=-1).view(-1, prev_acts_logits.shape[-1]),
                                 num_samples=1
                             ).reshape(batch_size, seq_len)
-                            print(f"prev_acts_indices shape: {prev_acts_indices.shape}")
                             x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
-                            prev_acts_logits_old = prev_acts_logits_old.detach()
+                            prev_acts_logits = prev_acts_logits.detach()
                     x_0 = x_0.detach()
                     self_force = True
 
@@ -387,35 +385,21 @@ def train_dit(dataset_path: str,
                         fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
                         loss = fm_loss
                         loss = loss + vq_loss
-                    elif np.random.rand() < 0.5:
-                        # previous action consistency loss
-                        v_t_pred, prev_acts_logits, _, vq_loss = dit_model(x_t, t, acts)
-                        fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
-                        loss = fm_loss
-                        loss = loss + vq_loss
-
-                        prev_acts_target = acts[:, :-1]
-                        prev_acts_logits_for_loss = prev_acts_logits[:, 1:]
-                        prev_action_loss = torch.nn.functional.cross_entropy(
-                            prev_acts_logits_for_loss.reshape(-1, prev_acts_logits_for_loss.shape[-1]), 
-                            prev_acts_target.reshape(-1)
-                        )
-                        loss = loss + prev_action_loss
                     else:
-                        # next action prediction loss
-                        v_t_pred, _, next_acts_logits, vq_loss = dit_model(x_t, t)
+                        # previous action consistency loss
+                        v_t_pred, prev_acts_logits, next_acts_logits, vq_loss = dit_model(x_t, t, acts)
                         fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
                         loss = fm_loss
                         loss = loss + vq_loss
 
-                        # Next action loss: predict action at t+1 from frame at t
-                        next_acts_target = prev_acts_logits_old[:, 1:]
-                        next_acts_logits_for_loss = next_acts_logits[:, :-1]
-                        next_action_loss = torch.nn.functional.kl_div(
-                            torch.nn.functional.log_softmax(next_acts_logits_for_loss, dim=-1),
-                            torch.nn.functional.softmax(next_acts_target, dim=-1),
-                            reduction='batchmean'
-                        )
+                        prev_acts_target = acts
+                        prev_acts_logits_for_loss = rearrange(prev_acts_logits,'b s p -> b p s')
+                        prev_action_loss = torch.nn.functional.cross_entropy(prev_acts_logits_for_loss, prev_acts_target)
+                        loss = loss + prev_action_loss
+
+                        next_acts_target = acts[:, 1:]
+                        next_acts_logits_for_loss = rearrange(next_acts_logits[:, :-1] ,'b s p -> b p s') 
+                        next_action_loss = torch.nn.functional.cross_entropy(next_acts_logits_for_loss, next_acts_target)
                         loss = loss + next_action_loss
                     
                 # Check for NaN loss
