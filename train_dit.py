@@ -275,9 +275,9 @@ def train_dit(dataset_path: str,
             # Load model weights
             state_dict = load_file(model_save_path)
             if hasattr(dit_model, 'module'):
-                dit_model.module.load_state_dict(state_dict)
+                dit_model.module.load_state_dict(state_dict, strict=False)
             else:
-                dit_model.load_state_dict(state_dict)
+                dit_model.load_state_dict(state_dict, strict=False)
             
             # Load training state
             training_state = torch.load(training_save_path, map_location=device)
