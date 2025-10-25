@@ -356,8 +356,7 @@ def train_dit(dataset_path: str,
                     x_mid = interpolate(x_0, x_1, t_mid)
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):
-                            acts = torch.cat([prev_acts_indices[:, 1:], torch.zeros_like(prev_acts_indices[:, :1])], dim=1) if prev_acts_indices is not None else None
-                            v_t_mid_pred, prev_acts_logits, next_acts_logits, _ = dit_model(x_mid, t_mid, acts)
+                            v_t_mid_pred, prev_acts_logits, next_acts_logits, _ = dit_model(x_mid, t_mid, prev_acts_indices)
                             # Sample from logits instead of argmax
                             # Reshape for multinomial: (batch_size, seq_len, num_codes) -> (batch_size*seq_len, num_codes)
                             prev_acts_indices = torch.multinomial(
