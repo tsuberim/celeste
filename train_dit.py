@@ -376,27 +376,26 @@ def train_dit(dataset_path: str,
                 
                 # Forward pass with mixed precision
                 with torch.amp.autocast("cuda"):
-                    acts = torch.cat([prev_acts_indices[:, 1:], torch.zeros_like(prev_acts_indices[:, :1])], dim=1) if prev_acts_indices is not None else None
                     prev_action_loss = None
                     next_action_loss = None
-                    if acts is None:
+                    if prev_acts_indices is None:
                         v_t_pred, _, _, vq_loss = dit_model(x_t, t)
                         fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
                         loss = fm_loss
                         loss = loss + vq_loss
                     else:
                         # previous action consistency loss
-                        v_t_pred, prev_acts_logits, next_acts_logits, vq_loss = dit_model(x_t, t, acts)
+                        v_t_pred, prev_acts_logits, next_acts_logits, vq_loss = dit_model(x_t, t, prev_acts_indices)
                         fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
                         loss = fm_loss
                         loss = loss + vq_loss
 
-                        prev_acts_target = acts
+                        prev_acts_target = prev_acts_indices
                         prev_acts_logits_for_loss = rearrange(prev_acts_logits,'b s p -> b p s')
                         prev_action_loss = torch.nn.functional.cross_entropy(prev_acts_logits_for_loss, prev_acts_target)
                         loss = loss + prev_action_loss
 
-                        next_acts_target = acts[:, 1:]
+                        next_acts_target = prev_acts_indices[:, 1:]
                         next_acts_logits_for_loss = rearrange(next_acts_logits[:, :-1] ,'b s p -> b p s') 
                         next_action_loss = torch.nn.functional.cross_entropy(next_acts_logits_for_loss, next_acts_target)
                         loss = loss + next_action_loss
