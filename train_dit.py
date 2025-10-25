@@ -290,10 +290,14 @@ def train_dit(dataset_path: str,
             if 'optimizer_state_dict_adamw' in training_state:
                 optimizer_adamw.load_state_dict(training_state['optimizer_state_dict_adamw'])
             
-            # Load sample weights if available
+            # Load sample weights if available and length matches
             if 'sample_grad_ema' in training_state:
-                sampler.weights = training_state['sample_grad_ema']
-                print(f"Loaded sample weights (EMA)")
+                saved_weights = training_state['sample_grad_ema']
+                if len(saved_weights) == len(dataset):
+                    sampler.weights = saved_weights
+                    print(f"Loaded sample weights (EMA)")
+                else:
+                    print(f"Warning: Saved weights length ({len(saved_weights)}) doesn't match dataset length ({len(dataset)}). Starting with fresh weights.")
             
             # Override learning rate with the provided learning_rate parameter
             for param_group in optimizer_muon.param_groups:
