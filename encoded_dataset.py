@@ -73,12 +73,14 @@ class EncodedDataset:
     def __len__(self) -> int:
         return self.num_sequences
     
-    def __getitem__(self, idx: int) -> torch.Tensor:
+    def __getitem__(self, idx: int):
         """
         Get sequence of encoded frames at index with reparameterization
         
         Returns:
-            Sampled latent sequence of shape (sequence_length, n_patches, latent_dim)
+            Tuple of (idx, sampled_sequence) where:
+            - idx: int - the sample index
+            - sampled_sequence: tensor of shape (sequence_length, n_patches, latent_dim)
         """
         if idx >= self.num_sequences:
             raise IndexError(f"Index {idx} out of range (max: {self.num_sequences})")
@@ -93,7 +95,7 @@ class EncodedDataset:
         # Always perform reparameterization using VAE2's method
         sampled_sequence = reparameterize(mu_sequence, logvar_sequence)
         
-        return sampled_sequence
+        return idx, sampled_sequence
     
     def get_batch(self, batch_size: int, random: bool = True) -> torch.Tensor:
         """

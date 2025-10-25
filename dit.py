@@ -354,7 +354,7 @@ class DiffusionTransformer(nn.Module):
             
         return emb
     
-    def forward(self, x: Tensor, t: Tensor, use_causal_mask: bool = True) -> Tensor:
+    def forward(self, x: Tensor, t: Tensor, use_causal_mask: bool = True):
         """
         Forward pass for sequence prediction
         
@@ -490,7 +490,7 @@ def test_dit():
     
     # Test flow matching loss
     print("\nTesting flow matching loss...")
-    loss = flow_matching_loss(dit, x, 23)
+    loss = flow_matching_loss(dit, x)
     print(f"Flow matching loss: {loss.item():.6f}")
     
     # Test RoPE

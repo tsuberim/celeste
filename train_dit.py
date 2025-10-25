@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import os
 import argparse
 from tqdm import tqdm
@@ -35,7 +35,7 @@ def cleanup_memory():
 
 
 def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
-               optimizer_adamw=None, global_batch_idx=None, hyperparams=None):
+               optimizer_adamw=None, global_batch_idx=None, hyperparams=None, sampler_weights=None):
     """Save DiT model checkpoint and training state"""
     os.makedirs(save_dir, exist_ok=True)
     
@@ -67,6 +67,8 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
         training_state['optimizer_state_dict_muon'] = optimizer_muon.state_dict()
     if optimizer_adamw is not None:
         training_state['optimizer_state_dict_adamw'] = optimizer_adamw.state_dict()
+    if sampler_weights is not None:
+        training_state['sample_grad_ema'] = sampler_weights
     
     # Save training state with same naming convention
     training_filename = filename.replace('.safetensors', '_training_state.pt')
@@ -94,7 +96,7 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
             sampled_prompts = []
             for _ in range(prompt_batch_size):
                 idx = torch.randint(0, len(dataset), (1,)).item()
-                prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
+                _, prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
                 # Take first past_context_length frames as prompt
                 sampled_prompts.append(prompt_seq[:past_context_length])
             
@@ -201,7 +203,18 @@ def train_dit(dataset_path: str,
     
     dataset = EncodedDataset(dataset_file, sequence_length=sequence_length, max_frames=max_frames)
     
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    # Initialize per-sample weights for weighted sampling
+    # Start with equal weights, will be updated based on losses
+    ema_alpha = 0.8  # EMA decay factor
+    
+    # Create weighted sampler
+    sampler = WeightedRandomSampler(
+        weights=torch.ones(len(dataset)),
+        num_samples=len(dataset),
+        replacement=True
+    )
+    
+    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=4, pin_memory=True)
     
     # Setup model
     device = get_device()
@@ -276,6 +289,11 @@ def train_dit(dataset_path: str,
             if 'optimizer_state_dict_adamw' in training_state:
                 optimizer_adamw.load_state_dict(training_state['optimizer_state_dict_adamw'])
             
+            # Load sample weights if available
+            if 'sample_grad_ema' in training_state:
+                sampler.weights = training_state['sample_grad_ema']
+                print(f"Loaded sample weights (EMA)")
+            
             # Override learning rate with the provided learning_rate parameter
             for param_group in optimizer_muon.param_groups:
                 param_group['lr'] = learning_rate
@@ -317,8 +335,9 @@ def train_dit(dataset_path: str,
         self_forcing_count = 0
         
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
-            for batch_idx, batch_data in enumerate(pbar):
+            for batch_idx, (indices, batch_data) in enumerate(pbar):
                 x_1 = batch_data.to(device)
+                indices = indices.cpu().numpy()
                 
                 x_0 = torch.randn_like(x_1)
                 batch_size, seq_len = x_1.shape[0], x_1.shape[1]
@@ -364,7 +383,15 @@ def train_dit(dataset_path: str,
                 
                 # Gradient clipping and get grad norm
                 grad_norm = torch.nn.utils.clip_grad_norm_(dit_model.parameters(), max_norm=0.5)
+                grad_norm_val = grad_norm if isinstance(grad_norm, float) else grad_norm.item()
                 
+                # Update sampler weights using gradient norm as difficulty estimate
+                # Higher grad norm = harder batch = sample more often
+                # Use same grad norm for all samples in batch as an estimate
+                if not self_force:
+                    for idx in indices:
+                        sampler.weights[idx] = ema_alpha * sampler.weights[idx] + (1 - ema_alpha) * grad_norm_val
+                        
                 # Step optimizer with scaler
                 scaler.step(optimizer_muon)
                 scaler.step(optimizer_adamw)
@@ -427,7 +454,7 @@ def train_dit(dataset_path: str,
                     print(f"\n15 minutes elapsed - saving checkpoint and generating video...")
                     
                     # Save checkpoint
-                    save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
+                    save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams, sampler.weights)
                     
                     # Generate video sample
                     if vae_model is not None:
@@ -455,7 +482,7 @@ def train_dit(dataset_path: str,
         
         # Save model checkpoint after each epoch
         print(f"\nSaving checkpoint after epoch {epoch+1}...")
-        save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
+        save_model(dit_model, save_dir, epoch + 1, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams, sampler.weights)
         
         # Generate and log video after each epoch
         if vae_model is not None:
@@ -467,13 +494,21 @@ def train_dit(dataset_path: str,
                 step_value=epoch + 1
             )
         
+        # Log sampling statistics at end of epoch
+        wandb.log({
+            'epoch/mean_sample_weight': sampler.weights.mean().item(),
+            'epoch/max_sample_weight': sampler.weights.max().item(),
+            'epoch/min_sample_weight': sampler.weights.min().item(),
+            'epoch/number': epoch + 1
+        })
+        
         # No LR scheduling - stability from architecture (RMSNorm + QKNorm)
         
         # Reset running loss
         running_loss = 0.0
     
     # Final save
-    save_model(dit_model, save_dir, num_epochs, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams)
+    save_model(dit_model, save_dir, num_epochs, optimizer_muon, optimizer_adamw, global_batch_idx, hyperparams, sampler.weights)
     
     print("Training completed!")
     wandb.finish()
