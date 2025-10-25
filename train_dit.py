@@ -377,7 +377,7 @@ def train_dit(dataset_path: str,
                 # Forward pass with mixed precision
                 with torch.amp.autocast("cuda"):
                     acts = torch.cat([prev_acts_indices[:, 1:], torch.zeros_like(prev_acts_indices[:, :1])], dim=1) if prev_acts_indices is not None else None
-                    v_t_pred, prev_acts_logits, next_acts_logits, vq_loss = dit_model(x_t, t, acts)
+                    v_t_pred, prev_acts_logits, _, vq_loss = dit_model(x_t, t, acts)
                     
                     # Flow matching loss
                     fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
@@ -399,13 +399,26 @@ def train_dit(dataset_path: str,
                         )
                         loss = loss + prev_action_loss
 
-                        next_acts_target = acts[:, :-1]
-                        next_acts_logits_for_loss = next_acts_logits[:, :-1]
-                        next_action_loss = torch.nn.functional.cross_entropy(
-                            next_acts_logits_for_loss.reshape(-1, next_acts_logits_for_loss.shape[-1]), 
-                            next_acts_target.reshape(-1)
+                        _, prev_acts_logits2, next_acts_logits2, vq_loss2 = dit_model(x_t, t)
+
+                        next_acts_target = prev_acts_logits[:, 1:]
+                        next_acts_logits_for_loss = next_acts_logits2[:, :-1]
+                        # KL divergence loss between next action predictions
+                        next_action_loss = torch.nn.functional.kl_div(
+                            torch.nn.functional.log_softmax(next_acts_logits_for_loss, dim=-1),
+                            torch.nn.functional.softmax(next_acts_target, dim=-1),
+                            reduction='batchmean'
                         )
                         loss = loss + next_action_loss
+                        loss = loss + vq_loss2
+
+                        prev2_action_loss = torch.nn.functional.kl_div(
+                            torch.nn.functional.log_softmax(prev_acts_logits, dim=-1),
+                            torch.nn.functional.softmax(prev_acts_logits2, dim=-1),
+                            reduction='batchmean'
+                        )
+                        prev_action_loss = prev_action_loss + prev2_action_loss
+                        loss = loss + prev_action_loss
                     
                 # Check for NaN loss
                 if torch.isnan(loss):
