@@ -398,17 +398,12 @@ def train_dit(dataset_path: str,
                             prev_acts_target.reshape(-1)
                         )
                         loss = loss + prev_action_loss
-                        
-                        # Next action loss: predict action at t+1 from frame at t
-                        next_acts_target = prev_acts_logits[:, 1:]
+
+                        next_acts_target = acts[:, :-1]
                         next_acts_logits_for_loss = next_acts_logits[:, :-1]
-                        # KL divergence between predicted next action logits and target logits
-                        next_acts_logits_flat = next_acts_logits_for_loss.reshape(-1, next_acts_logits_for_loss.shape[-1])
-                        next_acts_target_flat = next_acts_target.reshape(-1, next_acts_target.shape[-1])
-                        next_action_loss = torch.nn.functional.kl_div(
-                            torch.nn.functional.log_softmax(next_acts_logits_flat, dim=-1),
-                            torch.nn.functional.softmax(next_acts_target_flat, dim=-1),
-                            reduction='batchmean'
+                        next_action_loss = torch.nn.functional.cross_entropy(
+                            next_acts_logits_for_loss.reshape(-1, next_acts_logits_for_loss.shape[-1]), 
+                            next_acts_target.reshape(-1)
                         )
                         loss = loss + next_action_loss
                     
