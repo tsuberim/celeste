@@ -1,4 +1,4 @@
-yt-dlp>=2023.12.30
+yt-dlp>=2025.10.22
 opencv-python>=4.8.0
 numpy>=1.21.0
 tqdm>=4.64.0

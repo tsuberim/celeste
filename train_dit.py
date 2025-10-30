@@ -18,7 +18,6 @@ from encoded_dataset import EncodedDataset
 from dit import create_dit, DiffusionTransformer
 from utils import get_device
 from vae2 import VAE2
-from generate import generate_and_save_video
 
 
 def cleanup_memory():
@@ -81,6 +80,7 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
 def generate_and_log_videos(dit_model, vae_model, dataset, 
                             max_seq_len, n_patches, latent_dim, device, 
                             log_prefix="video", step_key="train/global_step", step_value=0):
+    return
     """Generate and log video samples to wandb"""
     try:
         print("Generating video sample...")
@@ -115,14 +115,21 @@ def generate_and_log_videos(dit_model, vae_model, dataset,
                 latent_dim=latent_dim,
                 device=device,
                 batch_size=prompt_batch_size,
-                prompt_sequences=prompt_sequences
+                prompt_sequences=prompt_sequences,
+                ode_steps=3
             )
             
             if video_array is not None:
                 # Log each video separately to wandb
                 for i in range(video_array.shape[0]):
+                    vid = video_array[i]  # (T, H, W, C), uint8
+                    # Reorder to (T, C, H, W) as preferred by wandb to avoid unintended conversions
+                    if vid.ndim == 4 and vid.shape[-1] in (1, 3, 4):
+                        vid_chw = vid.transpose(0, 3, 1, 2)
+                    else:
+                        vid_chw = vid
                     wandb.log({
-                        f'{log_prefix}_{i}': wandb.Video(video_array[i], fps=12, format="mp4"),
+                        f'{log_prefix}_{i}': wandb.Video(vid_chw, fps=12, format="mp4"),
                         step_key: step_value
                     })
                 print(f"Logged {video_array.shape[0]} video samples to wandb")
@@ -224,7 +231,7 @@ def train_dit(dataset_path: str,
         max_seq_len=max_seq_len
     ).to(device)
     
-    # Load VAE for video generation
+    # Load VAE for video generations
     vae_checkpoint_path = os.path.join(save_dir, f"vae_size2_latent{latent_dim}.safetensors")
     if os.path.exists(vae_checkpoint_path):
         vae_model = VAE2(size=2, latent_dim=latent_dim).to(device)
@@ -332,68 +339,56 @@ def train_dit(dataset_path: str,
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
         valid_batches = 0
-        self_forcing_loss = 0.0
-        self_forcing_count = 0
         
+        self_forcing_alpha = .2
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for batch_idx, (indices, batch_data) in enumerate(pbar):
                 x_1 = batch_data.to(device)
                 indices = indices.cpu().numpy()
-                
                 x_0 = torch.randn_like(x_1)
                 batch_size, seq_len = x_1.shape[0], x_1.shape[1]
                 t = torch.rand(batch_size, seq_len, device=x_1.device)
-
-                self_forcing_percent = 0.3
-                self_force = False
-                prev_acts_indices = None
-                while np.random.rand() < self_forcing_percent:
-                    t_mid = torch.rand(batch_size, seq_len, device=t.device)
-                    x_mid = interpolate(x_0, x_1, t_mid)
-                    with torch.no_grad():
-                        with torch.amp.autocast("cuda"):
-                            v_t_mid_pred, prev_acts_logits, _ = dit_model(x_mid, t_mid, prev_acts_indices)
-                            # Sample from logits instead of argmax
-                            # Reshape for multinomial: (batch_size, seq_len, num_codes) -> (batch_size*seq_len, num_codes)
-                            prev_acts_indices = torch.multinomial(
-                                torch.nn.functional.softmax(prev_acts_logits, dim=-1).view(-1, prev_acts_logits.shape[-1]),
-                                num_samples=1
-                            ).reshape(batch_size, seq_len)
-                            x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
-                            prev_acts_logits = prev_acts_logits.detach()
-                    x_0 = x_0.detach()
-                    self_force = True
-
-                if self_force:
-                    self_forcing_count += 1
-                    
-                x_t = interpolate(x_0, x_1, t)
-                v_t = x_1 - x_0
+                t_mid = torch.rand(batch_size, seq_len, device=t.device)
+                x_mid = interpolate(x_0, x_1, t_mid)
                 
                 # Forward pass with mixed precision
                 with torch.amp.autocast("cuda"):
-                    prev_action_loss = None
-                    next_action_loss = None
-                    if prev_acts_indices is None:
-                        v_t_pred, _, _, vq_loss = dit_model(x_t, t)
-                        fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
-                        loss = fm_loss
-                        loss = loss + vq_loss
-                    else:
-                        # previous action consistency loss
-                        v_t_pred, prev_acts_logits, vq_loss = dit_model(x_t, t, prev_acts_indices)
-                        fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
-                        loss = fm_loss
-                        loss = loss + vq_loss
+                    loss = 0.0
+                    v_t_mid_pred, acts_logits_no_acts, vq_loss_no_acts = dit_model(x_mid, t_mid)
+                    loss = loss + vq_loss_no_acts
+                    v_t_mid = x_1 - x_0
+                    fm_loss_no_acts = torch.nn.functional.mse_loss(v_t_mid_pred, v_t_mid)
+                    loss = loss + fm_loss_no_acts
+                    
+                    acts = torch.multinomial(torch.nn.functional.softmax(acts_logits_no_acts, dim=-1).view(-1, acts_logits_no_acts.shape[-1]),num_samples=1).reshape(batch_size, seq_len)
+                    self_forcing_x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
+                    x_0 = (1-self_forcing_alpha)*x_0 + self_forcing_alpha*self_forcing_x_0
+                    x_t = interpolate(x_0, x_1, t)
+                    v_t = x_1 - x_0
 
-                        prev_acts_target = prev_acts_indices
-                        prev_acts_logits_for_loss = rearrange(prev_acts_logits,'b s p -> b p s')
-                        prev_action_loss = torch.nn.functional.cross_entropy(prev_acts_logits_for_loss, prev_acts_target)
-                        loss = loss + prev_action_loss
+                    v_t_pred, acts_logits, vq_loss = dit_model(x_t, t)
+                    fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
+                    loss = loss + fm_loss
+                    loss = loss + vq_loss
 
-                        next_acts_target = prev_acts_indices[:, 1:]
-                        # Next-action prediction removed; skip next_action_loss
-                        loss = loss + next_action_loss
+                    # consistency loss
+                    acts_logits_for_loss = rearrange(acts_logits,'b s p -> b p s')
+                    consistency_loss = 0.01*torch.nn.functional.cross_entropy(acts_logits_for_loss, acts)
+                    loss = loss + consistency_loss
+                    # predictivity_loss = -0.01*torch.nn.functional.mse_loss(v_t_pred - v_t, v_t_mid_pred - v_t_mid)
+                    p = torch.softmax(acts_logits, dim=-1)
+                    entropy_loss = 0.01*(p * torch.log(p.clamp_min(1e-12))).sum(dim=-1).mean()
+                    loss = loss + entropy_loss
+                    # loss = loss + predictivity_loss
+
+                    
+                    losses = {
+                        'vq_loss': (vq_loss + vq_loss_no_acts).item(),
+                        'fm_loss': (fm_loss + fm_loss_no_acts).item(),
+                        'consistency_loss': consistency_loss.item(),
+                        # 'predictivity_loss': predictivity_loss.item(),
+                        'entropy_loss': entropy_loss.item(),
+                    }
                     
                 # Check for NaN loss
                 if torch.isnan(loss):
@@ -417,24 +412,18 @@ def train_dit(dataset_path: str,
                 # Update sampler weights using gradient norm as difficulty estimate
                 # Higher grad norm = harder batch = sample more often
                 # Use same grad norm for all samples in batch as an estimate
-                if not self_force:
-                    for idx in indices:
-                        sampler.weights[idx] = ema_alpha * sampler.weights[idx] + (1 - ema_alpha) * grad_norm_val
+                for idx in indices:
+                    sampler.weights[idx] = ema_alpha * sampler.weights[idx] + (1 - ema_alpha) * grad_norm_val
                         
                 # Step optimizer with scaler
                 scaler.step(optimizer_muon)
                 scaler.step(optimizer_adamw)
                 scaler.update()
                 
-                # Update metrics separately for self-forcing vs regular
                 global_batch_idx += 1
-                
-                if self_force:
-                    self_forcing_loss += loss.item()
-                else:
-                    running_loss += loss.item()
-                    epoch_loss += loss.item()
-                    valid_batches += 1
+                running_loss += loss.item()
+                epoch_loss += loss.item()
+                valid_batches += 1
                 
                 # Log to wandb
                 log_dict = {
@@ -444,29 +433,15 @@ def train_dit(dataset_path: str,
                     'train/grad_scaler_scale': scaler.get_scale(),
                     'train/epoch': epoch,
                     'train/global_step': global_batch_idx,
-                    'train/vq_loss': vq_loss.item(),
                     'train/loss': loss.item(),
                 }
-                
-                # Log action losses if available
-                if prev_action_loss is not None:
-                    log_dict['train/prev_action_loss'] = prev_action_loss.item()
-                if next_action_loss is not None:
-                    log_dict['train/next_action_loss'] = next_action_loss.item()
-                
-                # Log separately for self-forcing vs regular
-                if self_force:
-                    log_dict['train/loss_self_forcing'] = loss.item()
-                    log_dict['train/avg_loss_self_forcing'] = self_forcing_loss / self_forcing_count
-                else:
-                    log_dict['train/fm_loss'] = loss.item()
-                    if valid_batches > 0:
-                        log_dict['train/avg_loss'] = running_loss / valid_batches
-                
-                # Log ratio
-                total_batches = valid_batches + self_forcing_count
-                if total_batches > 0:
-                    log_dict['train/self_forcing_ratio'] = self_forcing_count / total_batches
+                # Log all component losses
+                for k, v in losses.items():
+                    log_dict[f'train/{k}'] = v
+            
+                # Average loss tracker
+                if valid_batches > 0:
+                    log_dict['train/avg_loss'] = running_loss / valid_batches
                 
                 wandb.log(log_dict)
                 
@@ -475,13 +450,11 @@ def train_dit(dataset_path: str,
                     'loss': f"{loss.item():.4f}",
                     'lr_muon': f"{optimizer_muon.param_groups[0]['lr']:.2e}",
                     'lr_adamw': f"{optimizer_adamw.param_groups[0]['lr']:.2e}",
-                    'grad_norm': f"{grad_norm:.3f}"
+                    'grad_norm': f"{grad_norm:.3f}",
+                    **losses
                 }
                 
-                if self_force:
-                    pbar_dict['sf_avg'] = f"{self_forcing_loss / self_forcing_count:.4f}"
-                elif valid_batches > 0:
-                    pbar_dict['avg_loss'] = f"{running_loss / valid_batches:.4f}"
+                pbar_dict['avg_loss'] = f"{running_loss / valid_batches:.4f}"
                 
                 pbar.set_postfix(pbar_dict)
                 
