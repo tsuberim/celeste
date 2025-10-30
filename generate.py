@@ -8,11 +8,9 @@ import torch.nn.functional as F
 import numpy as np
 import argparse
 import os
-from pathlib import Path
 from tqdm import tqdm
 import cv2
-from einops import rearrange
-from scipy.integrate import solve_ivp
+import time
 
 from dit import create_dit, DiffusionTransformer
 from vae2 import create_vae2
@@ -20,120 +18,130 @@ from utils import get_device
 from video_dataset import VideoDataset
 
 
-class ODEFlowSolver:
-    """ODE solver for flow matching generation"""
+def solve_ode(dit_model: DiffusionTransformer, 
+              gen_frames: torch.Tensor, 
+              gen_actions: torch.Tensor,
+              ode_steps: int = 10) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Solve ODE to generate next frame using Euler integration
     
-    def __init__(self, dit_model: DiffusionTransformer):
-        self.dit_model = dit_model
+    Args:
+        dit_model: DiT model
+        gen_frames: Generated frames so far (batch_size, seq_len, n_patches, latent_dim)
+        gen_actions: Actions for generated frames (batch_size, seq_len)
+        ode_steps: Number of Euler integration steps
+        
+    Returns:
+        (next_frame, next_acts_indices) tuple
+        next_frame: (batch_size, n_patches, latent_dim)
+        next_acts_indices: (batch_size, 1)
+    """
+    batch_size, seq_len, n_patches, latent_dim = gen_frames.shape
+    device = gen_frames.device
     
-    def solve_ode(self, gen_frames: torch.Tensor, gen_actions: torch.Tensor, future_frames: torch.Tensor) -> (torch.Tensor, torch.Tensor):
-        batch_size, seq_len, n_patches, latent_dim = gen_frames.shape
-
-        # Define ODE function for scipy
-        def ode_func(t_scalar, x_flat):
-            f_frames = x_flat
-            batch = torch.cat([gen_frames, f_frames], dim=1)
-            acts = torch.cat([gen_actions, torch.zeros_like(gen_actions[:, :1])], dim=1)
-            # Create per-frame time values: (batch_size, total_seq_len)
-            total_seq_len = batch.shape[1]
-            t = torch.full((batch_size, total_seq_len), .95, device=batch.device)
-            t[:, gen_frames.shape[1]:] = t_scalar
-            velocity, _, next_acts_logits, _ = self.dit_model(batch, t, acts)
-            return velocity[:, gen_frames.shape[1]:], next_acts_logits[:, gen_frames.shape[1]:]
+    # Initialize with random noise
+    x = torch.randn(batch_size, 1, n_patches, latent_dim, device=device, dtype=gen_frames.dtype)
+    
+    # Pre-allocate tensors to reduce allocations
+    zero_action = torch.zeros((batch_size, 1), dtype=gen_actions.dtype, device=device)
+    dt = 1.0 / ode_steps
+    
+    # Euler integration
+    for i in range(ode_steps):
+        t_scalar = i * dt
         
-
-        def euler_solve_mps(x0, steps):
-            x = x0
-            dt = 1.0 / steps
-            for i in range(steps):
-                t = i * dt#, torch.tensor([i * dt], device=x.device)
-                v, next_acts_logits = ode_func(t, x)
-                x = x + v * dt
-            return x, next_acts_logits
-
-        final_state, next_acts_logits = euler_solve_mps(future_frames, steps=10)
+        # Concatenate generated frames with current prediction
+        batch = torch.cat([gen_frames, x], dim=1)
+        act_logits = torch.cat([gen_actions, zero_action], dim=1)
         
-        # Get final state and reshape
-        # final_state = torch.from_numpy(solution.y).float().to(gen_frames.device)
-        f_frames = final_state.reshape(batch_size, future_frames.shape[1], n_patches, latent_dim)
+        # Create per-frame time values
+        total_seq_len = batch.shape[1]
+        t = torch.full((batch_size, total_seq_len), 0.95, device=device, dtype=gen_frames.dtype)
+        t[:, seq_len:] = t_scalar
         
-        gen_frame = f_frames[:, 0]
-        new_f_frame = torch.randn_like(gen_frame).unsqueeze(1)
-        next_acts_softmax = torch.nn.functional.softmax(next_acts_logits, dim=-1)
-        next_acts_indices = torch.multinomial(next_acts_softmax.reshape(-1, next_acts_softmax.shape[-1]), num_samples=1).reshape(batch_size, future_frames.shape[1])
-        return gen_frame, torch.cat([f_frames[:, 1:], new_f_frame], dim=1), next_acts_indices
+        # Get velocity and prev action logits
+        velocity, act_logits, _ = dit_model(batch, t, act_logits)
+        
+        # Update x using Euler step (in-place)
+        x.add_(velocity[:, seq_len:], alpha=dt)
+    
+    # Sample multinomial from act_logits[:, seq_len:]
+    # act_logits: (batch_size, 1, num_action_codes)
+    act_probs = torch.softmax(act_logits[:, seq_len:], dim=-1)
+    next_acts_indices = torch.multinomial(
+        act_probs.view(batch_size * act_probs.shape[1], act_probs.shape[-1]),
+        num_samples=1
+    ).view(batch_size, act_probs.shape[1])
+
+    return x[:, 0], next_acts_indices
 
 def actions_from_frames(dit_model, gen_frames, device):
     B, S = gen_frames.shape[0], gen_frames.shape[1]
+    return torch.randint(0, 8, (B, S), device=device)
     t = torch.full((B, S), 1.0, device=device)
     print(f'predicting previous actions...')
-    _, prev_acts_logits, next_acts_logits, _ = dit_model(gen_frames, t)
-    prev_acts_softmax = torch.nn.functional.softmax(prev_acts_logits, dim=-1)
-    prev_acts = torch.multinomial(prev_acts_softmax.reshape(-1, prev_acts_softmax.shape[-1]), num_samples=1).reshape(B, S)
-    acts = torch.cat([prev_acts[:, 1:], torch.zeros_like(prev_acts[:, :1])], dim=1)
-    print(f'predicting current actions...')
-    _, _, next_acts_logits, _ = dit_model(gen_frames, t, acts)
-    next_acts_softmax = torch.nn.functional.softmax(next_acts_logits, dim=-1)
-    next_acts = torch.multinomial(next_acts_softmax.reshape(-1, next_acts_softmax.shape[-1]), num_samples=1).reshape(B, S)
-    gen_actions = next_acts
-    return gen_actions
+    # Next-action prediction removed; return random actions for compatibility
+    return torch.randint(0, 8, (B, S), device=device)
 
 def generate_video_autoregressive(dit_model: DiffusionTransformer,
                                  vae_model,
-                                 max_frames: int,
                                  n_patches: int = 220,
                                  latent_dim: int = 48,
                                  max_seq_len: int = 24,
                                  device: torch.device = None,
-                                 past_context_length: int = 23,
                                  prompt_video_path: str = None,
                                  prompt_max_frames: int = None,
                                  batch_size: int = 1,
-                                 prompt_sequences: torch.Tensor = None) -> torch.Tensor:
+                                 prompt_sequences: torch.Tensor = None,
+                                 ode_steps: int = 10,
+                                 action_override_callback=None):
     """
-    Generate video frames autoregressively using DiT model
+    Generate video frames autoregressively using DiT model as a generator
     
     Args:
         dit_model: Trained DiT model
-        max_frames: Number of frames to generate
+        vae_model: Trained VAE model
         n_patches: Number of patches per frame
         latent_dim: Latent dimension per patch
-        max_seq_len: Maximum context length
-        ode_steps: Number of ODE integration steps
+        max_seq_len: Maximum sequence length (context window size)
         device: Device to run on
-        past_context_length: Past context length
-    Returns:
-        Generated frames (batch_size, max_frames, n_patches, latent_dim)
+        prompt_video_path: Optional video path for prompt
+        prompt_max_frames: Max frames from prompt video
+        batch_size: Batch size for generation
+        prompt_sequences: Optional pre-encoded prompt sequences
+        ode_steps: Number of ODE integration steps
+        
+        
+    Yields:
+        (encoded_frame, acts_indices, frame_idx) tuples
+        encoded_frame: (batch_size, n_patches, latent_dim)
+        acts_indices: (batch_size, 1)
+        frame_idx: int
     """
     if device is None:
         device = get_device()
     
-    dit_model = dit_model.to(device)
-    
-    # Initialize ODE solver
-    ode_solver = ODEFlowSolver(dit_model)
-    
-    print(f"Generating {batch_size} videos of {max_frames} frames each using DiT model...")
-    
-    # Use provided prompt sequences if available
-    if prompt_sequences is not None:
-        print(f"Using provided prompt sequences: {prompt_sequences.shape}")
-        gen_frames = prompt_sequences.to(device)
-        B, S = prompt_sequences.shape[0], prompt_sequences.shape[1]
+    inference_dtype = torch.float32
 
+    dit_model = dit_model.to(device=device, dtype=inference_dtype).eval()
+    
+    # No torch.compile support (removed)
+    
+    
+    if prompt_sequences is not None:
+        gen_frames = prompt_sequences.to(device=device, dtype=inference_dtype)
+        B, S = prompt_sequences.shape[0], prompt_sequences.shape[1]
         gen_actions = actions_from_frames(dit_model, gen_frames, device)
     # Load prompt frames from video or use random
     elif prompt_video_path and os.path.exists(prompt_video_path):
-        print(f"Loading prompt from video: {prompt_video_path}")
         from torch.utils.data import DataLoader
         
-        video_dataset = VideoDataset(prompt_video_path, sequence_length=past_context_length, max_frames=prompt_max_frames)
+        context_length = max_seq_len - 1  # Reserve 1 slot for prediction
+        video_dataset = VideoDataset(prompt_video_path, sequence_length=context_length, max_frames=prompt_max_frames)
         dataloader = DataLoader(video_dataset, batch_size=batch_size, shuffle=True)
         
         # Get a random sequence from the dataset
         prompt_frames = next(iter(dataloader)).to(device)  # (batch_size, seq_len, 3, H, W)
-        
-        print(f"Sampled prompt frames from random position: {prompt_frames.shape}")
         
         # Encode with VAE
         vae_model = vae_model.to(device)
@@ -146,51 +154,41 @@ def generate_video_autoregressive(dit_model: DiffusionTransformer,
             # Reparameterize
             from vae2 import reparameterize
             encoded = reparameterize(mu, logvar)  # (batch_size * seq_len, n_patches, latent_dim)
-            gen_frames = encoded.reshape(B, S, n_patches, latent_dim)  # (batch_size, seq_len, n_patches, latent_dim)
+            gen_frames = encoded.reshape(B, S, n_patches, latent_dim).to(dtype=inference_dtype)  # (batch_size, seq_len, n_patches, latent_dim)
         gen_actions = actions_from_frames(dit_model, gen_frames, device)
-        print(f"Encoded prompt frames: {gen_frames.shape}")
     else:
-        print("Using random prompt frames")
-        gen_frames = torch.randn(batch_size, past_context_length, n_patches, latent_dim, device=device)
-        gen_actions = torch.randint(0, 8, (batch_size, past_context_length), device=device)
+        context_length = max_seq_len - 1  # Reserve 1 slot for prediction
+        gen_frames = torch.randn(batch_size, context_length, n_patches, latent_dim, device=device, dtype=inference_dtype)
+        gen_actions = torch.randint(0, 8, (batch_size, context_length), device=device)
     
-    future_frames_prior = torch.randn(batch_size, max_seq_len-past_context_length, n_patches, latent_dim, device=device)
-    last_gen_frame = gen_frames[:, -1]  # (batch_size, n_patches, latent_dim)
-    # Repeat along the sequence dimension only
-    last_gen_frame_repeated = last_gen_frame.unsqueeze(1).expand(batch_size, max_seq_len-past_context_length, n_patches, latent_dim)
-    video_t = torch.arange(max_seq_len-past_context_length, device=gen_frames.device).unsqueeze(0) - past_context_length - 1
-    w = 4.8
-    t = 0.0
-    noise_weight = torch.clamp(torch.exp(-(w / (max_seq_len-past_context_length) - past_context_length)*(video_t - t)), max=1.0).unsqueeze(2).unsqueeze(3)
-    future_frames = noise_weight * last_gen_frame_repeated + (1 - noise_weight) * future_frames_prior
+    context_length = max_seq_len - 1  # Reserve 1 slot for prediction
+    frame_idx = 0
+    with torch.inference_mode():
+        while True:
+            # Generate next frame
+            new_frame, next_acts_indices = solve_ode(dit_model, gen_frames, gen_actions, ode_steps)
 
-    print(f"Initial gen_frames: {gen_frames.shape}")
-    print(f"Initial gen_actions: {gen_actions.shape}")
-    print(f"Initial future_frames: {future_frames.shape}")
+            # Optional override of next action via callback
+            if action_override_callback is not None:
+                try:
+                    override = action_override_callback(frame_idx, next_acts_indices)
+                    if override is not None:
+                        # Expect same shape (B, 1)
+                        next_acts_indices = override.to(gen_actions.device)
+                except Exception:
+                    pass
 
-    out_frames = gen_frames
-    out_actions = gen_actions
-
-    def add_frame(frame: torch.Tensor, acts_indices: torch.Tensor):
-        nonlocal gen_frames
-        nonlocal gen_actions
-        nonlocal out_frames
-        nonlocal out_actions
-        gen_frames = torch.cat([gen_frames, frame.unsqueeze(1)], dim=1)
-        gen_actions = torch.cat([gen_actions, acts_indices], dim=1)
-        out_frames = torch.cat([out_frames, frame.unsqueeze(1)], dim=1)
-        out_actions = torch.cat([out_actions, acts_indices], dim=1)
-        if gen_frames.shape[1] >= past_context_length:
-            gen_frames = gen_frames[:, 1:]
-            gen_actions = gen_actions[:, 1:]
-        return gen_frames, gen_actions
-
-    with torch.no_grad():
-        for _ in tqdm(range(max_frames), desc="Generating frames"):
-            new_frame, future_frames, next_acts_indices = ode_solver.solve_ode(gen_frames, gen_actions, future_frames)
-            add_frame(new_frame, next_acts_indices)
-
-    return out_frames, out_actions
+            # Yield frame - caller decides when to stop
+            yield new_frame, next_acts_indices, frame_idx
+            
+            # Update context (sliding window)
+            gen_frames = torch.cat([gen_frames, new_frame.unsqueeze(1)], dim=1)
+            gen_actions = torch.cat([gen_actions, next_acts_indices], dim=1)
+            if gen_frames.shape[1] > context_length:
+                gen_frames = gen_frames[:, 1:]
+                gen_actions = gen_actions[:, 1:]
+            
+            frame_idx += 1
 
 
 def decode_frames_with_vae(encoded_frames: torch.Tensor,
@@ -235,16 +233,16 @@ def decode_frames_with_vae(encoded_frames: torch.Tensor,
     return all_decoded
 
 
-def save_video(frames: torch.Tensor, output_path: str, fps: int = 24):
+def save_video(video_array: np.ndarray, output_path: str, fps: int = 24):
     """
-    Save decoded frames as MP4 video
+    Save video array as MP4 video
     
     Args:
-        frames: Decoded frames (num_frames, 3, H, W) in [-1, 1] range
+        video_array: Video frames (num_frames, H, W, C) in [0, 255] uint8 range
         output_path: Path to save video
         fps: Frames per second
     """
-    num_frames, channels, width, height = frames.shape
+    num_frames, height, width, channels = video_array.shape
     print(f"Video specs: {num_frames} frames, {height}x{width}, {fps} FPS")
     
     # Ensure output directory exists
@@ -273,19 +271,11 @@ def save_video(frames: torch.Tensor, output_path: str, fps: int = 24):
     
     frames_written = 0
     for frame_idx in tqdm(range(num_frames), desc="Writing video"):
-        # Get frame: [3, width, height] in range [-1, 1]
-        frame = frames[frame_idx]
-        
-        # Convert from (C, W, H) to (H, W, C)
-        frame_np = frame.permute(2, 1, 0).numpy()  # [height, width, 3]
-        
-        # Convert from [-1, 1] to [0, 1] then to [0, 255]
-        frame_np = (frame_np + 1.0) / 2.0
-        frame_np = np.clip(frame_np, 0, 1)
-        frame_np = (frame_np * 255).astype(np.uint8)
+        # Get frame: (H, W, C) in range [0, 255]
+        frame_rgb = video_array[frame_idx]
         
         # Convert RGB to BGR for OpenCV
-        frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         
         # Verify frame dimensions
         if frame_bgr.shape[:2] != (height, width):
@@ -313,14 +303,177 @@ def save_video(frames: torch.Tensor, output_path: str, fps: int = 24):
     print(f"Frames written: {frames_written}/{num_frames}")
 
 
+def generate_video(dit_model, vae_model, num_frames: int, **kwargs):
+    """
+    Generate video frames and return as numpy array
+    
+    Args:
+        dit_model: Trained DiT model
+        vae_model: Trained VAE model
+        num_frames: Number of frames to generate
+        **kwargs: Additional parameters for generate_video_autoregressive
+        
+    Returns:
+        numpy array (batch, frames, H, W, C) in [0, 255] uint8
+    """
+    device = kwargs.get('device', None)
+    if device is None:
+        device = get_device()
+        kwargs['device'] = device
+    
+    # Accumulate encoded frames from generator
+    encoded_frames_list = []
+    acts_list = []
+    
+    # Generate frames
+    for encoded_frame, acts_indices, idx in generate_video_autoregressive(
+        dit_model=dit_model,
+        vae_model=vae_model,
+        **kwargs
+    ):
+        encoded_frames_list.append(encoded_frame.cpu())
+        acts_list.append(acts_indices.cpu())
+        print(f"Generating frame {idx + 1}/{num_frames}", end='\r')
+        
+        if idx + 1 >= num_frames:
+            break
+    
+    print()  # New line after progress
+    
+    # Stack accumulated frames: list of (B, P, L) -> (N, B, P, L) -> (B, N, P, L)
+    encoded_frames = torch.stack(encoded_frames_list, dim=0).transpose(0, 1)  # (B, N, P, L)
+    
+    # Decode all videos - encoded_frames is (batch_size, num_frames, n_patches, latent_dim)
+    B, N, P, L = encoded_frames.shape
+    encoded_flat = encoded_frames.reshape(B * N, P, L)
+    decoded_frames = decode_frames_with_vae(encoded_flat, vae_model, device=device, batch_size=8)
+    decoded_frames = decoded_frames.reshape(B, N, *decoded_frames.shape[1:])  # (batch_size, num_frames, C, W, H)
+    
+    # Return as numpy array
+    video_array = decoded_frames.cpu().numpy()
+    
+    # Denormalize from [-1, 1] to [0, 255]
+    video_array = (video_array + 1.0) / 2.0
+    video_array = np.clip(video_array, 0, 1)
+    video_array = (video_array * 255).astype(np.uint8)
+    
+    # VAE outputs (batch, frames, C, W, H) but we return (batch, frames, H, W, C)
+    # Transpose to (batch, frames, H, W, C)
+    video_array = video_array.transpose(0, 1, 3, 4, 2)
+    
+    return video_array
+
+
+def generate_realtime(dit_model: DiffusionTransformer,
+                     vae_model,
+                     window_name: str = "Realtime Video Generation",
+                     **kwargs):
+    """
+    Generate video frames in realtime and display in a window
+    Press ESC to quit
+    """
+    device = kwargs.get('device', None)
+    if device is None:
+        device = get_device()
+        kwargs['device'] = device
+    
+    vae_model = vae_model.to(device)
+    vae_model.eval()
+    
+    print("Starting realtime video generation...")
+    print("Press ESC to quit")
+    
+    # Create window
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    
+    kwargs['batch_size'] = 1  # Always 1 for realtime
+    
+    frame_count = 0
+    start_time = time.time()
+    last_frame_time = start_time
+    fps_history = []
+    
+    try:
+        # Provide action override callback using keyboard input (0-7 to force, 'c' to clear)
+        forced_action = {'val': None}
+        def action_override_cb(frame_idx: int, predicted_actions: torch.Tensor):
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord('0'), ord('1'), ord('2'), ord('3'), ord('4'), ord('5'), ord('6'), ord('7')):
+                forced_action['val'] = int(chr(key))
+                print(f"Forced action set to {forced_action['val']}")
+            elif key in (ord('c'), ord('C')):
+                forced_action['val'] = None
+                print("Forced action cleared")
+            if forced_action['val'] is not None:
+                return torch.full_like(predicted_actions, forced_action['val'])
+            return None
+
+        for encoded_frame, acts_indices, idx in generate_video_autoregressive(
+            dit_model=dit_model,
+            vae_model=vae_model,
+            action_override_callback=action_override_cb,
+            **kwargs
+        ):
+            # Calculate FPS
+            current_time = time.time()
+            frame_time = current_time - last_frame_time
+            instant_fps = 1.0 / frame_time if frame_time > 0 else 0
+            fps_history.append(instant_fps)
+            
+            # Keep rolling average of last 10 frames
+            if len(fps_history) > 10:
+                fps_history.pop(0)
+            avg_fps = sum(fps_history) / len(fps_history)
+            
+            # Decode frame immediately
+            decoded_frame = vae_model.decode(encoded_frame)  # (1, 3, W, H)
+            
+            # Convert to numpy for display
+            frame_np = decoded_frame[0].cpu().permute(2, 1, 0).numpy()  # (H, W, 3)
+            frame_np = (frame_np + 1.0) / 2.0
+            frame_np = np.clip(frame_np, 0, 1)
+            frame_np = (frame_np * 255).astype(np.uint8)
+            frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
+            
+            # Add FPS overlay to frame
+            fps_text = f"FPS: {avg_fps:.2f}"
+            cv2.putText(frame_bgr, fps_text, (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+            # Display frame
+            cv2.imshow(window_name, frame_bgr)
+            
+            frame_count += 1
+            elapsed = current_time - start_time
+            overall_fps = frame_count / elapsed if elapsed > 0 else 0
+            print(f"Frame {frame_count} | FPS: {avg_fps:.1f} (avg: {overall_fps:.1f})", end='\r')
+            
+            last_frame_time = current_time
+            
+            # Check for ESC key (wait 1ms)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC
+                total_time = time.time() - start_time
+                final_fps = frame_count / total_time if total_time > 0 else 0
+                print(f"\nStopped after {frame_count} frames | Average FPS: {final_fps:.2f}")
+                break
+                
+    except KeyboardInterrupt:
+        print(f"\nInterrupted after {frame_count} frames")
+    finally:
+        cv2.destroyAllWindows()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate video using DiT model")
+    parser.add_argument("--realtime", action="store_true",
+                       help="Display video in realtime window instead of saving to file")
     parser.add_argument("--vae_checkpoint", type=str, 
                        default="./models/vae_size2_latent48.safetensors",
                        help="Path to VAE model checkpoint")
     parser.add_argument("--max_frames", type=int, default=24,
                        help="Number of frames to generate")
-    parser.add_argument("--max_seq_len", type=int, default=24,
+    parser.add_argument("--max_seq_len", type=int, default=4,
                        help="Maximum context length for DiT")
     parser.add_argument("--output", type=str, default="generated_video.mp4",
                        help="Output video path")
@@ -336,11 +489,9 @@ def main():
                        help="Number of patches per frame")
     parser.add_argument("--vae_size", type=int, default=2,
                        help="VAE size parameter")
-    parser.add_argument("--past_context_length", type=int, default=23,
-                       help="Past context length")
     parser.add_argument("--num_heads", type=int, default=16,
                        help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=16,
+    parser.add_argument("--num_layers", type=int, default=12,
                        help="Number of transformer layers")
     parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
@@ -348,16 +499,18 @@ def main():
                        help="Path to video file to use as prompt (optional)")
     parser.add_argument("--prompt_max_frames", type=int, default=None,
                        help="Maximum frames to load from prompt video (None = all)")
+    parser.add_argument("--ode_steps", type=int, default=3,
+                       help="Number of ODE integration steps")
+    # AMP removed
     
     args = parser.parse_args()
     
     device = get_device()
     print(f"Using device: {device}")
     
-    dit_checkpoint = f"./models/dit_seq{args.max_seq_len}_dim{args.latent_dim}_embed{args.embed_dim}_layers{args.num_layers}_heads{args.num_heads}.safetensors"
+    dit_checkpoint = f"./models/dit_seq24_dim{args.latent_dim}_embed{args.embed_dim}_layers{args.num_layers}_heads{args.num_heads}.safetensors"
 
     # Load DiT model
-    print(f"Loading DiT model from {dit_checkpoint}")
     dit_model = create_dit(
         latent_dim=args.latent_dim,
         n_patches=args.n_patches,
@@ -367,165 +520,77 @@ def main():
         max_seq_len=args.max_seq_len,
     )
     
-    # Load DiT checkpoint (safetensors format)
-    from safetensors.torch import load_file
-    dit_state_dict = load_file(dit_checkpoint)
-    dit_model.load_state_dict(dit_state_dict)
-    print("DiT model loaded successfully")
+    # Load DiT checkpoint if exists
+    if os.path.exists(dit_checkpoint):
+        print(f"Loading DiT model from {dit_checkpoint}")
+        from safetensors.torch import load_file
+        dit_state_dict = load_file(dit_checkpoint)
+        dit_model.load_state_dict(dit_state_dict, strict=False)
+        print("DiT model loaded successfully")
+    else:
+        print(f"Warning: DiT checkpoint not found at {dit_checkpoint}, using random weights")
     
     # Load VAE model
-    print(f"Loading VAE model from {args.vae_checkpoint}")
     vae_model = create_vae2(input_channels=3, latent_dim=args.latent_dim, size=args.vae_size)
     
-    # Load VAE checkpoint (safetensors format)
-    vae_state_dict = load_file(args.vae_checkpoint)
-    if hasattr(vae_model, 'module'):
-        vae_model.module.load_state_dict(vae_state_dict)
-    else:
-        vae_model.load_state_dict(vae_state_dict)
-    print("VAE model loaded successfully")
-    
-    # Generate encoded frames for multiple videos
-    encoded_frames, acts = generate_video_autoregressive(
-        dit_model=dit_model,
-        vae_model=vae_model,
-        max_frames=args.max_frames,
-        n_patches=args.n_patches,
-        latent_dim=args.latent_dim,
-        max_seq_len=args.max_seq_len,
-        device=device,
-        past_context_length=args.past_context_length,
-        prompt_video_path=args.prompt_video,
-        prompt_max_frames=args.prompt_max_frames,
-        batch_size=args.num_videos
-    )
-    
-    print(f"Generated encoded frames shape: {encoded_frames.shape}")
-    
-    # Decode all videos at once
-    B, N, P, L = encoded_frames.shape
-    print(f"Decoding {B} videos with {N} frames each...")
-    
-    # Flatten batch and frames: (B, N, P, L) -> (B*N, P, L)
-    encoded_flat = encoded_frames.reshape(B * N, P, L)
-    
-    # Decode all frames at once
-    decoded_flat = decode_frames_with_vae(
-        encoded_frames=encoded_flat,
-        vae_model=vae_model,
-        batch_size=args.batch_size,
-        device=device
-    )
-    
-    # Reshape back to videos: (B*N, C, H, W) -> (B, N, C, H, W)
-    decoded_frames = decoded_flat.reshape(B, N, *decoded_flat.shape[1:])
-    print(f"Decoded frames shape: {decoded_frames.shape}")
-    
-    # Save each video
-    for video_idx in range(B):
-        # Get frames for this video
-        video_frames = decoded_frames[video_idx]  # (N, C, H, W)
-        
-        # Create output path for this video
-        if B > 1:
-            base_name = args.output.replace('.mp4', f'_{video_idx}.mp4')
+    # Load VAE checkpoint if exists
+    if os.path.exists(args.vae_checkpoint):
+        print(f"Loading VAE model from {args.vae_checkpoint}")
+        from safetensors.torch import load_file
+        vae_state_dict = load_file(args.vae_checkpoint)
+        if hasattr(vae_model, 'module'):
+            vae_model.module.load_state_dict(vae_state_dict)
         else:
-            base_name = args.output
-        
-        # Save video
-        save_video(video_frames, base_name, fps=args.fps)
-        print(f"Video {video_idx + 1}/{B} saved to {base_name}")
-    
-    print(f"Generation complete! {B} video(s) saved.")
-
-
-def generate_and_save_video(dit_model, vae_model, video_path: str, num_frames: int = 24, 
-                         past_context_length: int = 23, max_seq_len: int = 24, 
-                         n_patches: int = 220, latent_dim: int = 48, fps: int = 12, device=None,
-                         batch_size: int = 4, prompt_sequences: torch.Tensor = None,
-                         return_arrays: bool = False):
-    """
-    Generate video frames and optionally save as MP4 or return as numpy arrays
-    
-    Args:
-        dit_model: Trained DiT model
-        vae_model: Trained VAE model
-        video_path: Path to save MP4 video (ignored if return_arrays=True)
-        num_frames: Number of frames to generate
-        past_context_length: Context length for generation
-        max_seq_len: Maximum sequence length
-        n_patches: Number of patches
-        latent_dim: Latent dimension
-        fps: Frames per second
-        device: Device to use
-        batch_size: Number of videos to generate
-        prompt_sequences: Optional prompt sequences
-        return_arrays: If True, return numpy arrays instead of saving to files
-        
-    Returns:
-        If return_arrays=True: List of numpy arrays (N, H, W, C) in [0, 255] uint8
-        If return_arrays=False: List of paths to saved MP4 videos
-    """
-    if device is None:
-        device = get_device()
-    
-    # Generate frames for multiple videos
-    encoded_frames, acts = generate_video_autoregressive(
-        dit_model=dit_model,
-        vae_model=vae_model,
-        max_frames=num_frames,
-        n_patches=n_patches,
-        latent_dim=latent_dim,
-        max_seq_len=max_seq_len,
-        device=device,
-        past_context_length=past_context_length,
-        prompt_video_path=None,
-        prompt_max_frames=None,
-        batch_size=batch_size,
-        prompt_sequences=prompt_sequences
-    )
-    
-    # Decode all videos - encoded_frames is (batch_size, num_frames, n_patches, latent_dim)
-    B, N, P, L = encoded_frames.shape
-    encoded_flat = encoded_frames.reshape(B * N, P, L)
-    decoded_frames = decode_frames_with_vae(encoded_flat, vae_model, device=device, batch_size=8)
-    decoded_frames = decoded_frames.reshape(B, N, *decoded_frames.shape[1:])  # (batch_size, num_frames, C, W, H)
-    
-    if return_arrays:
-        # Return as numpy array for direct WandB logging
-        # decoded_frames is (batch_size, num_frames, C, W, H)
-        video_array = decoded_frames.cpu().numpy()
-        
-        # Denormalize from [-1, 1] to [0, 255]
-        video_array = (video_array + 1.0) / 2.0
-        video_array = np.clip(video_array, 0, 1)
-        video_array = (video_array * 255).astype(np.uint8)
-        
-        # VAE outputs (batch, frames, C, W, H) but WandB needs (batch, frames, C, H, W)
-        # Swap W and H: axis 3 and 4
-        video_array = video_array.transpose(0, 1, 2, 4, 3)
-        
-        return video_array
+            vae_model.load_state_dict(vae_state_dict)
+        print("VAE model loaded successfully")
     else:
-        # Save each video as a separate MP4
-        video_paths = []
-        try:
-            for i in range(batch_size):
-                # Get frames for this video
-                video_frames = decoded_frames[i]  # (N, C, W, H)
-                
-                # Create path for this video
-                base_path = video_path.replace('.mp4', f'_{i}.mp4')
-                
-                # Save using the save_video function
-                save_video(video_frames, base_path, fps=fps)
-                video_paths.append(base_path)
-                print(f"Saved MP4 {i+1}/{batch_size} to {base_path}")
+        print(f"Warning: VAE checkpoint not found at {args.vae_checkpoint}, using random weights")
+    
+    # Prepare kwargs for generation
+    gen_kwargs = {
+        'n_patches': args.n_patches,
+        'latent_dim': args.latent_dim,
+        'max_seq_len': args.max_seq_len,
+        'device': device,
+        'prompt_video_path': args.prompt_video,
+        'prompt_max_frames': args.prompt_max_frames,
+        'ode_steps': args.ode_steps
+    }
+    
+    
+    
+    # Run in selected mode
+    if args.realtime:
+        generate_realtime(
+            dit_model=dit_model,
+            vae_model=vae_model,
+            **gen_kwargs
+        )
+    else:
+        # Generate and save videos
+        print(f"Generating {args.num_videos} video(s) with {args.max_frames} frames each...")
+        
+        for video_idx in range(args.num_videos):
+            # Create output path for this video
+            if args.num_videos > 1:
+                output_path = args.output.replace('.mp4', f'_{video_idx}.mp4')
+            else:
+                output_path = args.output
             
-            return video_paths
-        except Exception as e:
-            print(f"Failed to save MP4s: {e}")
-            return None
+            # Generate video array
+            gen_kwargs['batch_size'] = 1
+            video_array = generate_video(
+                dit_model=dit_model,
+                vae_model=vae_model,
+                num_frames=args.max_frames,
+                **gen_kwargs
+            )
+            
+            # Save video (video_array is (batch, frames, H, W, C))
+            save_video(video_array[0], output_path, fps=args.fps)
+            print(f"Video {video_idx + 1}/{args.num_videos} saved to {output_path}")
+        
+        print(f"Generation complete! {args.num_videos} video(s) saved.")
 
 
 if __name__ == "__main__":

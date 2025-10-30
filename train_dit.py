@@ -78,7 +78,7 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
     print(f"Checkpoint saved: model to {model_save_path}, training state to {training_save_path}")
 
 
-def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length, 
+def generate_and_log_videos(dit_model, vae_model, dataset, 
                             max_seq_len, n_patches, latent_dim, device, 
                             log_prefix="video", step_key="train/global_step", step_value=0):
     """Generate and log video samples to wandb"""
@@ -93,31 +93,29 @@ def generate_and_log_videos(dit_model, vae_model, dataset, past_context_length,
         with torch.no_grad():
             # Sample 4 random prompt sequences from the dataset
             prompt_batch_size = 4
+            context_length = max_seq_len - 1  # Reserve 1 slot for prediction
             sampled_prompts = []
             for _ in range(prompt_batch_size):
                 idx = torch.randint(0, len(dataset), (1,)).item()
                 _, prompt_seq = dataset[idx]  # (seq_len, n_patches, latent_dim)
-                # Take first past_context_length frames as prompt
-                sampled_prompts.append(prompt_seq[:past_context_length])
+                # Take first context_length frames as prompt
+                sampled_prompts.append(prompt_seq[:context_length])
             
-            # Stack prompts: (batch_size, past_context_length, n_patches, latent_dim)
+            # Stack prompts: (batch_size, context_length, n_patches, latent_dim)
             prompt_sequences = torch.stack(sampled_prompts, dim=0)
             
-            # Generate videos and get as numpy array directly (batch, frames, C, H, W)
-            video_array = generate_and_save_video(
+            # Generate videos and get as numpy array directly (batch, frames, H, W, C)
+            from generate import generate_video
+            video_array = generate_video(
                 dit_model=dit_model,
                 vae_model=vae_model,
-                video_path=None,  # Not used when return_arrays=True
                 num_frames=24,
-                past_context_length=past_context_length,
                 max_seq_len=max_seq_len,
                 n_patches=n_patches,
                 latent_dim=latent_dim,
-                fps=12,
                 device=device,
                 batch_size=prompt_batch_size,
-                prompt_sequences=prompt_sequences,
-                return_arrays=True
+                prompt_sequences=prompt_sequences
             )
             
             if video_array is not None:
@@ -159,8 +157,7 @@ def train_dit(dataset_path: str,
               num_epochs: int = 1000000,
               learning_rate: float = 1e-3,
               save_dir: str = "./models",
-              max_frames: int = None,
-              past_context_length: int = 23):
+              max_frames: int = None):
     """Train DiT on encoded video dataset"""
     
     # Initialize wandb
@@ -179,7 +176,6 @@ def train_dit(dataset_path: str,
             "num_epochs": num_epochs,
             "learning_rate": learning_rate,
             "max_frames": max_frames,
-            "past_context_length": past_context_length,
         }
     )
     
@@ -356,7 +352,7 @@ def train_dit(dataset_path: str,
                     x_mid = interpolate(x_0, x_1, t_mid)
                     with torch.no_grad():
                         with torch.amp.autocast("cuda"):
-                            v_t_mid_pred, prev_acts_logits, next_acts_logits, _ = dit_model(x_mid, t_mid, prev_acts_indices)
+                            v_t_mid_pred, prev_acts_logits, _ = dit_model(x_mid, t_mid, prev_acts_indices)
                             # Sample from logits instead of argmax
                             # Reshape for multinomial: (batch_size, seq_len, num_codes) -> (batch_size*seq_len, num_codes)
                             prev_acts_indices = torch.multinomial(
@@ -385,7 +381,7 @@ def train_dit(dataset_path: str,
                         loss = loss + vq_loss
                     else:
                         # previous action consistency loss
-                        v_t_pred, prev_acts_logits, next_acts_logits, vq_loss = dit_model(x_t, t, prev_acts_indices)
+                        v_t_pred, prev_acts_logits, vq_loss = dit_model(x_t, t, prev_acts_indices)
                         fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
                         loss = fm_loss
                         loss = loss + vq_loss
@@ -396,8 +392,7 @@ def train_dit(dataset_path: str,
                         loss = loss + prev_action_loss
 
                         next_acts_target = prev_acts_indices[:, 1:]
-                        next_acts_logits_for_loss = rearrange(next_acts_logits[:, :-1] ,'b s p -> b p s') 
-                        next_action_loss = torch.nn.functional.cross_entropy(next_acts_logits_for_loss, next_acts_target)
+                        # Next-action prediction removed; skip next_action_loss
                         loss = loss + next_action_loss
                     
                 # Check for NaN loss
@@ -501,7 +496,7 @@ def train_dit(dataset_path: str,
                     # Generate video sample
                     if vae_model is not None:
                         generate_and_log_videos(
-                            dit_model, vae_model, dataset, past_context_length,
+                            dit_model, vae_model, dataset,
                             max_seq_len, n_patches, latent_dim, device,
                             log_prefix="generated_video",
                             step_key="train/global_step",
@@ -529,7 +524,7 @@ def train_dit(dataset_path: str,
         # Generate and log video after each epoch
         if vae_model is not None:
             generate_and_log_videos(
-                dit_model, vae_model, dataset, past_context_length,
+                dit_model, vae_model, dataset,
                 max_seq_len, n_patches, latent_dim, device,
                 log_prefix="epoch_video",
                 step_key="epoch/number",
@@ -584,8 +579,6 @@ def main():
                        help="Directory to save model checkpoints")
     parser.add_argument("--max_frames", type=int, default=None,
                        help="Maximum number of frames to load from dataset (None for all)")
-    parser.add_argument("--past_context_length", type=int, default=23,
-                       help="Past context length")
     args = parser.parse_args()
     
     if not os.path.exists(args.dataset_path):
@@ -605,8 +598,7 @@ def main():
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         save_dir=args.save_dir,
-        max_frames=args.max_frames,
-        past_context_length=args.past_context_length
+        max_frames=args.max_frames
     )
 
 

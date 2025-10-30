@@ -380,11 +380,10 @@ class DiffusionTransformer(nn.Module):
         
         # Learnable action tokens (like CLS tokens in ViT)
         self.prev_action_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        self.next_action_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         
         # Transformer blocks
         self.blocks = nn.ModuleList([
-            DiTBlock(embed_dim, num_heads, ff_dim, dropout, max_seq_len, n_patches + 2, max_seq_len)  # +2 for prev and next action tokens
+            DiTBlock(embed_dim, num_heads, ff_dim, dropout, max_seq_len, n_patches + 1, max_seq_len)  # +1 for prev action token
             for _ in range(num_layers)
         ])
         
@@ -405,19 +404,9 @@ class DiffusionTransformer(nn.Module):
             nn.Linear(embed_dim, num_action_codes)
         )
         
-        # Next action prediction head: predict next actions from action token
-        self.next_action_pred_mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, action_dim)
-        )
-        
-        # Next action logits head: converts quantized actions to logits
-        self.next_action_logits_mlp = nn.Sequential(
-            nn.Linear(action_dim, embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, num_action_codes)
-        )
+        # Next action prediction removed
+        self.next_action_pred_mlp = None
+        self.next_action_logits_mlp = None
         
         # Final RMS norm
         self.norm = RMSNorm(embed_dim)
@@ -458,13 +447,15 @@ class DiffusionTransformer(nn.Module):
             Timestep embeddings of shape (batch_size, time_embed_dim)
         """
         # Scale timesteps to [0, 1000] for better numerical properties
-        timesteps = timesteps * 1000.0
+        # Keep dtype/device consistent with inputs to avoid Half/Float mismatches under compile
+        scale = torch.tensor(1000.0, device=timesteps.device, dtype=timesteps.dtype)
+        timesteps = timesteps * scale
         
         half_dim = self.time_embed_dim // 2
         # Pre-compute frequency scaling
-        freqs = torch.exp(
-            -torch.log(torch.tensor(10000.0)) * torch.arange(0, half_dim, device=timesteps.device) / half_dim
-        )
+        base = torch.tensor(10000.0, device=timesteps.device, dtype=timesteps.dtype)
+        arange = torch.arange(0, half_dim, device=timesteps.device, dtype=timesteps.dtype)
+        freqs = torch.exp(-torch.log(base) * arange / half_dim)
         
         # Compute sinusoidal embeddings
         args = timesteps[:, None] * freqs[None, :]
@@ -522,26 +513,23 @@ class DiffusionTransformer(nn.Module):
         # Reshape to (batch_size, seq_len, n_patches, embed_dim) to insert action tokens
         x_emb = x_emb.reshape(batch_size, seq_len, n_patches, self.embed_dim)
         
-        # Add action tokens to each frame
-        # prev_action_token: (1, 1, embed_dim) -> expand to (batch_size, seq_len, 1, embed_dim)
-        # next_action_token: (1, 1, embed_dim) -> expand to (batch_size, seq_len, 1, embed_dim)
+        # Add only prev action token
         prev_action_tokens = self.prev_action_token.expand(batch_size, seq_len, 1, self.embed_dim)
-        next_action_tokens = self.next_action_token.expand(batch_size, seq_len, 1, self.embed_dim)
         
-        # Concatenate patches with action tokens: (batch_size, seq_len, n_patches + 2, embed_dim)
-        x_emb = torch.cat([x_emb, prev_action_tokens, next_action_tokens], dim=2)
+        # Concatenate patches with prev action token: (batch_size, seq_len, n_patches + 1, embed_dim)
+        x_emb = torch.cat([x_emb, prev_action_tokens], dim=2)
         
-        # Flatten back: (batch_size, seq_len * (n_patches + 2), embed_dim)
-        x_emb = x_emb.reshape(batch_size, seq_len * (n_patches + 2), self.embed_dim)
+        # Flatten back: (batch_size, seq_len * (n_patches + 1), embed_dim)
+        x_emb = x_emb.reshape(batch_size, seq_len * (n_patches + 1), self.embed_dim)
         
-        # Broadcast time embeddings across patches + action tokens
-        t_emb_broadcast = t_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches + 2, self.embed_dim)
-        t_emb_broadcast = t_emb_broadcast.reshape(batch_size, seq_len * (n_patches + 2), self.embed_dim)
+        # Broadcast time embeddings across patches + prev action token
+        t_emb_broadcast = t_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches + 1, self.embed_dim)
+        t_emb_broadcast = t_emb_broadcast.reshape(batch_size, seq_len * (n_patches + 1), self.embed_dim)
         
-        # Broadcast action embeddings across patches + action tokens if provided
+        # Broadcast action embeddings across patches + prev action token if provided
         if action_emb is not None:
-            action_emb_broadcast = action_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches + 2, self.embed_dim)
-            action_emb_broadcast = action_emb_broadcast.reshape(batch_size, seq_len * (n_patches + 2), self.embed_dim)
+            action_emb_broadcast = action_emb.unsqueeze(2).expand(batch_size, seq_len, n_patches + 1, self.embed_dim)
+            action_emb_broadcast = action_emb_broadcast.reshape(batch_size, seq_len * (n_patches + 1), self.embed_dim)
         else:
             action_emb_broadcast = None
         
@@ -553,13 +541,12 @@ class DiffusionTransformer(nn.Module):
         # x_emb = self.norm(x_emb)
         
         # Reshape to separate patches and action tokens
-        # (batch_size, seq_len * (n_patches + 2), embed_dim) -> (batch_size, seq_len, n_patches + 2, embed_dim)
-        x_emb = x_emb.reshape(batch_size, seq_len, n_patches + 2, self.embed_dim)
+        # (batch_size, seq_len * (n_patches + 1), embed_dim) -> (batch_size, seq_len, n_patches + 1, embed_dim)
+        x_emb = x_emb.reshape(batch_size, seq_len, n_patches + 1, self.embed_dim)
         
         # Split into regular patches and action tokens
         x_patches = x_emb[:, :, :n_patches, :]  # (batch_size, seq_len, n_patches, embed_dim)
         prev_action_token_embs = x_emb[:, :, n_patches, :]  # (batch_size, seq_len, embed_dim)
-        next_action_token_embs = x_emb[:, :, n_patches + 1, :]  # (batch_size, seq_len, embed_dim)
         
         # Project patches back to latent space
         x_patches_flat = x_patches.reshape(batch_size, seq_len * n_patches, self.embed_dim)
@@ -577,19 +564,10 @@ class DiffusionTransformer(nn.Module):
         # Convert quantized previous actions to logits
         prev_logits = self.prev_action_logits_mlp(prev_actions_quantized)  # (batch_size, seq_len, num_action_codes)
         
-        # Predict next actions from next action token embeddings
-        next_actions_continuous = self.next_action_pred_mlp(next_action_token_embs)  # (batch_size, seq_len, action_dim)
+        # VQ loss (only previous)
+        vq_loss = prev_vq_loss
         
-        # Quantize next actions to discrete codes (always compute VQ loss)
-        next_actions_quantized, _, next_vq_loss = self.action_vq(next_actions_continuous, compute_loss=True)
-        
-        # Convert quantized next actions to logits
-        next_logits = self.next_action_logits_mlp(next_actions_quantized)  # (batch_size, seq_len, num_action_codes)
-        
-        # Combine VQ losses
-        vq_loss = prev_vq_loss + next_vq_loss
-        
-        return output, prev_logits, next_logits, vq_loss
+        return output, prev_logits, vq_loss
     
 
 
