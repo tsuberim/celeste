@@ -373,7 +373,7 @@ def train_dit(dataset_path: str,
                     loss = loss + consistency_loss
                     p = torch.softmax(acts_logits, dim=-1)
                     entropy = -(p * torch.log(p.clamp_min(1e-12))).sum(dim=-1).mean()
-                    entropy_loss = -0.01*entropy
+                    entropy_loss = -0.1*entropy
                     loss = loss + entropy_loss
 
                     losses = {

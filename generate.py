@@ -70,6 +70,8 @@ def solve_ode(dit_model: DiffusionTransformer,
     gumbel = F.gumbel_softmax(act_logits[:, seq_len:], tau=1.0, hard=True, dim=-1)
     next_acts_indices = gumbel.argmax(dim=-1)
 
+    print(f"next_acts_indices: {next_acts_indices}")
+
     return x[:, 0], next_acts_indices
 
 def actions_from_frames(dit_model, gen_frames, device):
