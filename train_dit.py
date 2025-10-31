@@ -115,7 +115,7 @@ def generate_and_log_videos(dit_model, vae_model, dataset,
                 device=device,
                 batch_size=prompt_batch_size,
                 prompt_sequences=prompt_sequences,
-                ode_steps=3
+                ode_steps=5
             )
             
             if video_array is not None:
