@@ -377,7 +377,8 @@ def train_dit(dataset_path: str,
                     loss = loss + entropy_loss
 
                     losses = {
-                        'fm_loss': (fm_loss + fm_loss_no_acts).item(),
+                        'fm_loss': fm_loss.item(),
+                        'fm_loss_no_acts': fm_loss_no_acts.item(),
                         'consistency_loss': consistency_loss.item(),
                         'entropy': entropy.item(),
                     }
