@@ -498,7 +498,7 @@ def main():
                        help="Path to video file to use as prompt (optional)")
     parser.add_argument("--prompt_max_frames", type=int, default=None,
                        help="Maximum frames to load from prompt video (None = all)")
-    parser.add_argument("--ode_steps", type=int, default=4,
+    parser.add_argument("--ode_steps", type=int, default=5,
                        help="Number of ODE integration steps")
     # AMP removed
     

@@ -373,13 +373,13 @@ def train_dit(dataset_path: str,
                     loss = loss + consistency_loss
                     p = torch.softmax(acts_logits, dim=-1)
                     entropy = -(p * torch.log(p.clamp_min(1e-12))).sum(dim=-1).mean()
-                    entropy_loss = -0.1*entropy
+                    entropy_loss = -0.05*entropy
                     loss = loss + entropy_loss
 
                     losses = {
                         'fm_loss': (fm_loss + fm_loss_no_acts).item(),
                         'consistency_loss': consistency_loss.item(),
-                        'entropy': entropy.item() + 10,
+                        'entropy': entropy.item(),
                     }
                     
                 # Check for NaN loss
