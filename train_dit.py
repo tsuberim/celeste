@@ -80,7 +80,6 @@ def save_model(dit_model, save_dir: str, epoch: int, optimizer_muon=None,
 def generate_and_log_videos(dit_model, vae_model, dataset, 
                             max_seq_len, n_patches, latent_dim, device, 
                             log_prefix="video", step_key="train/global_step", step_value=0):
-    return
     """Generate and log video samples to wandb"""
     try:
         print("Generating video sample...")
@@ -122,12 +121,9 @@ def generate_and_log_videos(dit_model, vae_model, dataset,
             if video_array is not None:
                 # Log each video separately to wandb
                 for i in range(video_array.shape[0]):
-                    vid = video_array[i]  # (T, H, W, C), uint8
-                    # Reorder to (T, C, H, W) as preferred by wandb to avoid unintended conversions
-                    if vid.ndim == 4 and vid.shape[-1] in (1, 3, 4):
-                        vid_chw = vid.transpose(0, 3, 1, 2)
-                    else:
-                        vid_chw = vid
+                    vid = video_array[i]  # (T, H, W, C), uint8 (H/W are swapped in source)
+                    # Convert to (T, C, H, W) with corrected height/width -> (T, 3, 180, 320)
+                    vid_chw = vid.transpose(0, 3, 2, 1)
                     wandb.log({
                         f'{log_prefix}_{i}': wandb.Video(vid_chw, fps=12, format="mp4"),
                         step_key: step_value
@@ -340,7 +336,7 @@ def train_dit(dataset_path: str,
         epoch_loss = 0.0
         valid_batches = 0
         
-        self_forcing_alpha = .2
+        self_forcing_alpha = .3
         with tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}") as pbar:
             for batch_idx, (indices, batch_data) in enumerate(pbar):
                 x_1 = batch_data.to(device)
@@ -354,40 +350,34 @@ def train_dit(dataset_path: str,
                 # Forward pass with mixed precision
                 with torch.amp.autocast("cuda"):
                     loss = 0.0
-                    v_t_mid_pred, acts_logits_no_acts, vq_loss_no_acts = dit_model(x_mid, t_mid)
-                    loss = loss + vq_loss_no_acts
+                    v_t_mid_pred, acts_logits_no_acts = dit_model(x_mid, t_mid)
                     v_t_mid = x_1 - x_0
                     fm_loss_no_acts = torch.nn.functional.mse_loss(v_t_mid_pred, v_t_mid)
                     loss = loss + fm_loss_no_acts
                     
-                    acts = torch.multinomial(torch.nn.functional.softmax(acts_logits_no_acts, dim=-1).view(-1, acts_logits_no_acts.shape[-1]),num_samples=1).reshape(batch_size, seq_len)
+                    # Sample actions with Gumbel-Softmax (hard) for discrete indices
+                    acts_onehot = torch.nn.functional.gumbel_softmax(acts_logits_no_acts, tau=1.0, hard=True, dim=-1)
+                    acts = acts_onehot.argmax(dim=-1)
                     self_forcing_x_0 = x_mid - v_t_mid_pred*t_mid.view(batch_size, seq_len, 1, 1)
                     x_0 = (1-self_forcing_alpha)*x_0 + self_forcing_alpha*self_forcing_x_0
                     x_t = interpolate(x_0, x_1, t)
                     v_t = x_1 - x_0
 
-                    v_t_pred, acts_logits, vq_loss = dit_model(x_t, t)
+                    v_t_pred, acts_logits = dit_model(x_t, t, acts)
                     fm_loss = torch.nn.functional.mse_loss(v_t_pred, v_t)
                     loss = loss + fm_loss
-                    loss = loss + vq_loss
 
                     # consistency loss
                     acts_logits_for_loss = rearrange(acts_logits,'b s p -> b p s')
-                    consistency_loss = 0.01*torch.nn.functional.cross_entropy(acts_logits_for_loss, acts)
+                    consistency_loss = 0.1*torch.nn.functional.cross_entropy(acts_logits_for_loss, acts)
                     loss = loss + consistency_loss
-                    # predictivity_loss = -0.01*torch.nn.functional.mse_loss(v_t_pred - v_t, v_t_mid_pred - v_t_mid)
                     p = torch.softmax(acts_logits, dim=-1)
-                    entropy_loss = 0.01*(p * torch.log(p.clamp_min(1e-12))).sum(dim=-1).mean()
-                    loss = loss + entropy_loss
-                    # loss = loss + predictivity_loss
+                    entropy = -(p * torch.log(p.clamp_min(1e-12))).sum(dim=-1).mean()
 
-                    
                     losses = {
-                        'vq_loss': (vq_loss + vq_loss_no_acts).item(),
                         'fm_loss': (fm_loss + fm_loss_no_acts).item(),
                         'consistency_loss': consistency_loss.item(),
-                        # 'predictivity_loss': predictivity_loss.item(),
-                        'entropy_loss': entropy_loss.item(),
+                        'entropy': entropy.item() + 10,
                     }
                     
                 # Check for NaN loss

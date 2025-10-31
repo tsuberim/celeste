@@ -60,18 +60,15 @@ def solve_ode(dit_model: DiffusionTransformer,
         t[:, seq_len:] = t_scalar
         
         # Get velocity and prev action logits
-        velocity, act_logits, _ = dit_model(batch, t, act_logits)
+        velocity, act_logits = dit_model(batch, t, act_logits)
         
         # Update x using Euler step (in-place)
         x.add_(velocity[:, seq_len:], alpha=dt)
     
-    # Sample multinomial from act_logits[:, seq_len:]
+    # Sample with Gumbel-Softmax (hard) from act_logits[:, seq_len:]
     # act_logits: (batch_size, 1, num_action_codes)
-    act_probs = torch.softmax(act_logits[:, seq_len:], dim=-1)
-    next_acts_indices = torch.multinomial(
-        act_probs.view(batch_size * act_probs.shape[1], act_probs.shape[-1]),
-        num_samples=1
-    ).view(batch_size, act_probs.shape[1])
+    gumbel = F.gumbel_softmax(act_logits[:, seq_len:], tau=1.0, hard=True, dim=-1)
+    next_acts_indices = gumbel.argmax(dim=-1)
 
     return x[:, 0], next_acts_indices
 

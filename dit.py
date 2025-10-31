@@ -365,12 +365,10 @@ class DiffusionTransformer(nn.Module):
             nn.Linear(embed_dim, embed_dim)
         )
         
-        # Vector quantizer for actions (shared codebook for input and output)
-        self.action_vq = VectorQuantizer(num_codes=num_action_codes, code_dim=action_dim)
-        
-        # Action conditioning: project codebook embeddings to model dimension
-        self.action_mlp = nn.Sequential(
-            nn.Linear(action_dim, embed_dim),
+        # Action conditioning: one-hot indices passed through MLP to embedding dim
+        self.num_action_codes = num_action_codes
+        self.action_index_mlp = nn.Sequential(
+            nn.Linear(num_action_codes, embed_dim),
             nn.SiLU(),
             nn.Linear(embed_dim, embed_dim)
         )
@@ -390,19 +388,8 @@ class DiffusionTransformer(nn.Module):
         # Output projection: back to latent space (per patch, not for action token)
         self.output_proj = nn.Linear(embed_dim, latent_dim)
         
-        # Previous action prediction head: predict previous actions from action token
-        self.prev_action_pred_mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, action_dim)
-        )
-        
-        # Previous action logits head: converts quantized actions to logits
-        self.prev_action_logits_mlp = nn.Sequential(
-            nn.Linear(action_dim, embed_dim),
-            nn.SiLU(),
-            nn.Linear(embed_dim, num_action_codes)
-        )
+        # Previous action logits head: predict logits directly from token embedding
+        self.prev_action_logits = nn.Linear(embed_dim, num_action_codes)
         
         # Next action prediction removed
         self.next_action_pred_mlp = None
@@ -478,11 +465,9 @@ class DiffusionTransformer(nn.Module):
             use_causal_mask: Whether to use causal masking for autoregressive prediction
             
         Returns:
-            Tuple of (velocity_field, prev_action_logits, next_action_logits, vq_loss)
+            Tuple of (velocity_field, prev_action_logits)
             - velocity_field: (batch_size, seq_len, n_patches, latent_dim)
             - prev_action_logits: (batch_size, seq_len, num_codes) - logits for previous action prediction
-            - next_action_logits: (batch_size, seq_len, num_codes) - logits for next action prediction
-            - vq_loss: VQ loss (commitment + codebook) - includes both prev and next
         """
         batch_size, seq_len, n_patches, latent_dim = x.shape
         
@@ -496,11 +481,11 @@ class DiffusionTransformer(nn.Module):
         # (batch_size * seq_len, embed_dim) -> (batch_size, seq_len, embed_dim) -> (batch_size, seq_len * n_patches, embed_dim)
         t_emb = t_emb.reshape(batch_size, seq_len, self.embed_dim)
         
-        # Get action embeddings if provided (using shared VQ codebook)
+        # Get action embeddings if provided (one-hot + MLP)
         if actions is not None:
             # actions: (batch_size, seq_len) - discrete indices
-            action_emb = self.action_vq.codebook(actions)  # (batch_size, seq_len, action_dim)
-            action_emb = self.action_mlp(action_emb)  # (batch_size, seq_len, embed_dim)
+            one_hot = F.one_hot(actions, num_classes=self.num_action_codes).to(dtype=self.input_proj.weight.dtype)
+            action_emb = self.action_index_mlp(one_hot)  # (batch_size, seq_len, embed_dim)
         else:
             action_emb = None
         
@@ -544,7 +529,7 @@ class DiffusionTransformer(nn.Module):
         # (batch_size, seq_len * (n_patches + 1), embed_dim) -> (batch_size, seq_len, n_patches + 1, embed_dim)
         x_emb = x_emb.reshape(batch_size, seq_len, n_patches + 1, self.embed_dim)
         
-        # Split into regular patches and action tokens
+        # Split into regular patchers and action tokens
         x_patches = x_emb[:, :, :n_patches, :]  # (batch_size, seq_len, n_patches, embed_dim)
         prev_action_token_embs = x_emb[:, :, n_patches, :]  # (batch_size, seq_len, embed_dim)
         
@@ -555,19 +540,10 @@ class DiffusionTransformer(nn.Module):
         # Reshape back to (batch_size, seq_len, n_patches, latent_dim)
         output = output.reshape(batch_size, seq_len, n_patches, latent_dim)
         
-        # Predict previous actions from prev action token embeddings
-        prev_actions_continuous = self.prev_action_pred_mlp(prev_action_token_embs)  # (batch_size, seq_len, action_dim)
+        # Predict previous actions directly from token embeddings
+        prev_logits = self.prev_action_logits(prev_action_token_embs)  # (batch_size, seq_len, num_action_codes)
         
-        # Quantize previous actions to discrete codes (always compute VQ loss)
-        prev_actions_quantized, _, prev_vq_loss = self.action_vq(prev_actions_continuous, compute_loss=True)
-        
-        # Convert quantized previous actions to logits
-        prev_logits = self.prev_action_logits_mlp(prev_actions_quantized)  # (batch_size, seq_len, num_action_codes)
-        
-        # VQ loss (only previous)
-        vq_loss = prev_vq_loss
-        
-        return output, prev_logits, vq_loss
+        return output, prev_logits
     
 
 
@@ -638,21 +614,18 @@ def test_dit():
     print(f"Time shape: {t.shape}")
     
     # Forward pass with time conditioning (no actions)
-    output, prev_action_logits, next_action_logits, vq_loss = dit(x, t)
+    output, prev_action_logits = dit(x, t)
     print(f"Output shape: {output.shape}")
     print(f"Expected output shape: ({batch_size}, {seq_len}, {n_patches}, {latent_dim})")
     print(f"Previous action logits shape: {prev_action_logits.shape}")
-    print(f"Next action logits shape: {next_action_logits.shape}")
     print(f"Expected action logits shape: ({batch_size}, {seq_len}, 8)")
-    print(f"VQ loss: {vq_loss.item():.6f}")
     
     # Forward pass with action conditioning
     print("\nTesting with action conditioning...")
     actions = torch.randint(0, 8, (batch_size, seq_len))
-    output_cond, prev_logits_cond, next_logits_cond, _ = dit(x, t, actions)
+    output_cond, prev_logits_cond = dit(x, t, actions)
     print(f"Output with actions shape: {output_cond.shape}")
     print(f"Previous action logits with conditioning shape: {prev_logits_cond.shape}")
-    print(f"Next action logits with conditioning shape: {next_logits_cond.shape}")
     
     # Test RoPE
     print("\nTesting TorchTune RoPE implementation...")
