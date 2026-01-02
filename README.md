@@ -46,9 +46,9 @@ VAE reconstruction:
 -----
 
 <p align="center">
-  <img src="results/vae_1.png" alt="VAE reconstruction 1" width="32%" /><br>
-  <img src="results/vae_2.png" alt="VAE reconstruction 2" width="32%" /><br>
-  <img src="results/vae_3.png" alt="VAE reconstruction 3" width="32%" />
+  <img src="results/vae_1.png" alt="VAE reconstruction 1" /><br>
+  <img src="results/vae_2.png" alt="VAE reconstruction 2"/><br>
+  <img src="results/vae_3.png" alt="VAE reconstruction 3"/>
 </p>
 
 **Conclusion**: the VAE is able to reconstruct frames with enough fidelity to capture the dynamic features of the scene (player, enemies and moving pieces)
@@ -58,15 +58,15 @@ Video generation:
 
 <p align="center">
   <br>
-  <video src="results/dit_object_permanence.mp4" width="32%" controls loop></video>
+  <video src="results/dit_object_permanence.mp4" controls loop></video>
   <br>
   <sub>Figure 1. (mid-training) The model starts to exhibit sings of object permanence and game dynamics</sub>
   <br><br>
-  <video src="results/dit_player_movement.mp4" width="32%" controls loop></video>
+  <video src="results/dit_player_movement.mp4" controls loop></video>
   <br>
   <sub>Figure 2. The model exhibits object permanence and starts to exhibit signs of player movement prediction</sub>
   <br><br>
-  <video src="results/dit_game_dynamics.mp4" width="32%" controls loop></video>
+  <video src="results/dit_game_dynamics.mp4" controls loop></video>
   <br>
   <sub>Figure 2. The model exhibits signs of camera movement understanding</sub>
 </p>
