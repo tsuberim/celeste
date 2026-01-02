@@ -2,8 +2,8 @@
 
 Abstract:
 ---
-
 - This work shows a working implementation and results of a video generation model trained on raw gameplay fottage of the game "Celeste". 
+- We show empirical evidence of a working world-model that starts to capture game dynamics and shows strong indications of improvement with scale.
 - The work is free under open-source and open-weights, MIT license access.
 
 Stats:
