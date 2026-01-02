@@ -6,8 +6,14 @@ Abstract:
 - We show empirical evidence of a working world-model that starts to capture game dynamics and shows strong indications of improvement with scale.
 - The work is free under open-source and open-weights, MIT license access.
 
-Stats:
+Overview:
 ---
+
+Architecture:
+- a VAE model is used to compress raw frame data into a latent respresentation
+- a DiT model is then used to denoise a sequence of latent frames t
+- the denoised latents are then decompressed using VAE to obtain generated frames
+
 Data:
 - [~4.5hr gameplay fottage](https://www.youtube.com/watch?v=z8r255LoVJc)
 - 12fps (sub-sampled)
