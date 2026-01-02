@@ -58,17 +58,14 @@ Video generation:
 
 <p align="center">
   <br>
-  <video src="results/dit_object_permanence.mp4" controls loop></video>
-  <br>
+  <img src="results/dit_object_permanence.gif" alt="Object permanence demonstration" /><br>
   <sub>Figure 1. (mid-training) The model starts to exhibit sings of object permanence and game dynamics</sub>
   <br><br>
-  <video src="results/dit_player_movement.mp4" controls loop></video>
-  <br>
+  <img src="results/dit_player_movement.gif" alt="Player movement prediction" /><br>
   <sub>Figure 2. The model exhibits object permanence and starts to exhibit signs of player movement prediction</sub>
   <br><br>
-  <video src="results/dit_game_dynamics.mp4" controls loop></video>
-  <br>
-  <sub>Figure 2. The model exhibits signs of camera movement understanding</sub>
+  <img src="results/dit_game_dynamics.gif" alt="Camera movement understanding" /><br>
+  <sub>Figure 3. The model exhibits signs of camera movement understanding</sub>
 </p>
 
 **Conclusion**: the model shows signs of capturing the dynamic aspects of the game in its world model (scene translation, dynamic objects movement, player movement); this proves the basic model works, and gives stong indication of improved results as scale increases.
