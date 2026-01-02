@@ -347,7 +347,7 @@ def main():
                        help="Past context length")
     parser.add_argument("--num_heads", type=int, default=16,
                        help="Number of attention heads")
-    parser.add_argument("--num_layers", type=int, default=16,
+    parser.add_argument("--num_layers", type=int, default=12,
                        help="Number of transformer layers")
     parser.add_argument("--embed_dim", type=int, default=768,
                        help="Transformer embedding dimension")
