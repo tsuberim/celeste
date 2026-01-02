@@ -22,7 +22,7 @@ VAE:
 
 Video model:
 - ~255M param model
-- DiT with Flow matching loss, RoPE
+- DiT with Flow matching + Self forcing loss, RoPE
 - 10-step auto-regressive generation using euler integration
 - `(B, T, 220, 48)` -> `(B, T, 220, 48)` - trained with T=24 (sequence length)
 - ~$120 training cost (incl. experimentation)
